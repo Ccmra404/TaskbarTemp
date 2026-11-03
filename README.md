@@ -13,7 +13,7 @@ Some readings require administrator privileges. NPU usage stays at 0% while no a
 
 ## Build
 
-Requirements: Windows x64 and the .NET 10 SDK. The project uses the dependency DLLs in `lib/` and restores `System.Management` from NuGet.
+Requirements: Windows x64 and the .NET 10 SDK. Build-time DLL references are kept in `lib/`; `System.Management` is restored from NuGet.
 
 ```powershell
 dotnet publish .\src\TaskbarTemp.csproj -c Release -r win-x64 --self-contained false -o .\publish\win-x64
@@ -28,5 +28,9 @@ The application creates `config.ini` beside the executable when needed. It is ma
 ## Repository contents
 
 - `src/` — application source and project file.
-- `lib/` — DLL references required by the project.
+- `src/TaskbarTemp.csproj` — pinned package dependencies.
+- `lib/` — pinned hardware-monitoring DLL dependencies.
+- `licenses/` and `THIRD-PARTY-NOTICES.md` — dependency license notices.
 - `README.local.md` — local notes, ignored by Git and not part of the repository.
+
+TaskbarTemp itself does not yet declare a software license; public visibility does not grant reuse rights.

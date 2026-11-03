@@ -331,7 +331,7 @@ namespace TaskbarTemp
                     Font = SystemFonts.MessageBoxFont,
                     AutoScaleMode = AutoScaleMode.Dpi,
                     Opacity = 1.0,
-                    FormBorderStyle = FormBorderStyle.SizableToolWindow,
+                    FormBorderStyle = FormBorderStyle.FixedToolWindow,
                     StartPosition = FormStartPosition.Manual,
                     MaximizeBox = false,
                     MinimizeBox = false,

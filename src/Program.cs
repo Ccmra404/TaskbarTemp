@@ -43,7 +43,7 @@ namespace TaskbarTemp
         private Label _cpuName, _cpuTemp, _cpuLoad, _cpuClock;
         private Label _gpuNameLabel, _gpuTempLabel, _gpuLoadLabel, _vramLabel;
         private Label _memoryLabel, _memoryValue;
-        private Label _networkName, _networkSpeed, _npuName, _npuUsageLabel;
+        private Label _networkSpeed, _npuName, _npuUsageLabel;
         private readonly HashSet<string> _physicalNetworkNames;
         private readonly HashSet<string> _hardwareFailures = new(StringComparer.OrdinalIgnoreCase);
 
@@ -323,27 +323,24 @@ namespace TaskbarTemp
                     MinimumSize = new Size(320, 220),
                     Font = SystemFonts.MessageBoxFont,
                     AutoScaleMode = AutoScaleMode.Dpi,
-                    Opacity = 0.97,
+                    Opacity = 0.92,
                     FormBorderStyle = FormBorderStyle.SizableToolWindow,
                     StartPosition = FormStartPosition.Manual,
                     MaximizeBox = false,
                     MinimizeBox = false,
                     ShowInTaskbar = false
                 };
-                _cpuName = AddSection(new (string, string)[] { ("温度", ""), ("负载", ""), ("频率", "") }, out var cpuRows);
+                _cpuName = AddSection(new (string, string)[] { ("温度", ""), ("负载", ""), ("频率", "") }, out var cpuRows, true);
                 _cpuTemp = cpuRows[0]; _cpuLoad = cpuRows[1]; _cpuClock = cpuRows[2];
 
                 _gpuNameLabel = AddSection(new (string, string)[] { ("温度", ""), ("负载", ""), ("显存", "") }, out var gpuRows);
                 _gpuTempLabel = gpuRows[0]; _gpuLoadLabel = gpuRows[1]; _vramLabel = gpuRows[2];
 
-                _memoryLabel = AddSection(new (string, string)[] { ("用量", "") }, out var memoryRows);
-                _memoryValue = memoryRows[0];
-
-                _networkName = AddSection(new (string, string)[] { ("速率", "") }, out var networkRows);
-                _networkSpeed = networkRows[0];
-
                 _npuName = AddSection(new (string, string)[] { ("负载", "") }, out var npuRows);
                 _npuUsageLabel = npuRows[0];
+
+                _memoryLabel = AddSection(new (string, string)[] { ("用量", "") }, out var memoryRows);
+                _memoryValue = memoryRows[0];
                 _details.Controls.Add(_detailsContent);
                 _details.FormClosing += (s, e) => { if (!_exiting) { e.Cancel = true; _details.Hide(); } };
             }
@@ -450,6 +447,7 @@ namespace TaskbarTemp
                     return null;
                 }
 
+                // shortcut: treats the sole Neural-only adapter as the NPU; add PnP-to-LUID mapping if multiple match.
                 _loggedNpuProbe = true;
                 float maxUsage = 0f;
                 foreach (float usage in neuralByAdapter[candidate].Values)
@@ -496,6 +494,9 @@ namespace TaskbarTemp
 
         private void ReplaceTrayIcon(string text, Color accent, string key)
         {
+            if (_style == IconStyle.Mono)
+                key += "|" + IconRenderer.MonoGlyphColor.ToArgb();
+
             if (key == _lastKey) return;
 
             var nextIcon = IconRenderer.Render(text, accent, _iconSize, _style);
@@ -532,7 +533,7 @@ namespace TaskbarTemp
             e.Graphics.FillPath(fill, path);
             e.Graphics.DrawPath(border, path);
         }
-        private Label AddSection((string, string)[] rows, out Label[] values)
+        private Label AddSection((string, string)[] rows, out Label[] values, bool withNetwork = false)
         {
             var section = new Panel
             {
@@ -547,7 +548,7 @@ namespace TaskbarTemp
             {
                 AutoSize = false,
                 ColumnCount = 2,
-                RowCount = rows.Length + 1,
+                RowCount = rows.Length + (withNetwork ? 2 : 1),
                 Dock = DockStyle.Top,
                 Padding = new Padding(4)
             };
@@ -558,7 +559,7 @@ namespace TaskbarTemp
             {
                 AutoSize = true,
                 MaximumSize = new Size(320, 0),
-                Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+                Font = new Font(SystemFonts.MessageBoxFont.FontFamily, 10f, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleLeft,
                 UseMnemonic = false,
                 Margin = new Padding(3, 2, 3, 4)
@@ -566,6 +567,9 @@ namespace TaskbarTemp
             layout.Controls.Add(name, 0, 0);
             layout.SetColumnSpan(name, 2);
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            if (withNetwork)
+                _networkSpeed = new Label { AutoSize = true, Anchor = AnchorStyles.Left, MaximumSize = new Size(285, 0), Margin = new Padding(3, 1, 3, 1) };
 
             values = new Label[rows.Length];
             for (int i = 0; i < rows.Length; i++)
@@ -590,6 +594,14 @@ namespace TaskbarTemp
                     Margin = new Padding(3, 2, 3, 2)
                 };
                 layout.Controls.Add(values[i], 1, row);
+            }
+
+            if (withNetwork)
+            {
+                int networkRow = rows.Length + 1;
+                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                layout.Controls.Add(new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 1, 6, 1) }, 0, networkRow);
+                layout.Controls.Add(_networkSpeed, 1, networkRow);
             }
 
             section.Controls.Add(layout);
@@ -620,7 +632,6 @@ namespace TaskbarTemp
                 ? $"{_memUsedGb.Value:0.0} / {_memTotalGb.Value:0.0} GB"
                 : "—");
 
-            SetLabelText(_networkName, "网络");
             SetLabelText(_networkSpeed, $"↓ {FormatNetworkSpeed(_networkDownloadBps)}   ↑ {FormatNetworkSpeed(_networkUploadBps)}");
 
             SetLabelText(_npuName, "NPU");

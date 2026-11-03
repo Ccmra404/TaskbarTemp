@@ -98,9 +98,11 @@ namespace TaskbarTemp
             catch { return Color.FromArgb(255, 245, 245, 245); }
         }
 
+        public static Color MonoGlyphColor => DetectGlyphColor();
+
         private static void DrawMono(Graphics g, string text, Color accent, int size)
         {
-            Color glyph = DetectGlyphColor();
+            Color glyph = MonoGlyphColor;
 
             float numFs = text.Length >= 3 ? size * (size <= 16 ? 0.54f : 0.60f) : size * (size <= 16 ? 0.76f : 0.80f);
 

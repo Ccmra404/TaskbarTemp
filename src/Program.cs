@@ -26,15 +26,111 @@ namespace TaskbarTemp
 
             Settings.EnsureDefault();
             ApplicationConfiguration.Initialize();
-            Application.Run(new TrayContext());
+            var context = new TrayContext();
+            Application.Run(context);
+            if (!context.WaitForShutdown(TimeSpan.FromSeconds(5)))
+                context.Log("shutdown timed out; process is leaving without waiting for the blocked sampler");
         }
     }
 
     internal sealed class TrayContext : ApplicationContext
     {
+        private sealed record SampleSnapshot(
+            float? Temp, float? Load, float? Clock, string HwName,
+            float? GpuTemp, float? GpuLoad, float? VramUsed, float? VramTotal, string GpuName,
+            float? MemUsedGb, float? MemTotalGb, float? NetworkDownload, float? NetworkUpload);
+
+        private sealed class BufferedSectionPanel : Panel
+        {
+            public BufferedSectionPanel()
+                => SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        private sealed class BufferedCategoryIcon : Control
+        {
+            private readonly string _category;
+            private Bitmap _image;
+            private Color _tileColor, _glyphColor;
+
+            public BufferedCategoryIcon(string category, Color tileColor, Color glyphColor)
+            {
+                _category = category;
+                _tileColor = Color.FromArgb(tileColor.ToArgb());
+                _glyphColor = Color.FromArgb(glyphColor.ToArgb());
+                TabStop = false;
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                         ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+                BackColor = Color.Transparent;
+            }
+
+            public void SetTheme(Color tileColor, Color glyphColor)
+            {
+                tileColor = Color.FromArgb(tileColor.ToArgb());
+                glyphColor = Color.FromArgb(glyphColor.ToArgb());
+                if (_tileColor.ToArgb() == tileColor.ToArgb() && _glyphColor.ToArgb() == glyphColor.ToArgb()) return;
+                _tileColor = tileColor;
+                _glyphColor = glyphColor;
+                ResetImage();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                if (_image == null)
+                {
+                    _image = new Bitmap(Math.Max(1, Width), Math.Max(1, Height), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+                    using var graphics = Graphics.FromImage(_image);
+                    graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                    var bounds = new Rectangle(Point.Empty, _image.Size);
+                    using var brush = new SolidBrush(_tileColor);
+                    using var path = new GraphicsPath();
+                    int radius = Math.Max(2, (int)Math.Round(10 * DeviceDpi / 96f));
+                    path.AddArc(bounds.Left, bounds.Top, radius, radius, 180, 90);
+                    path.AddArc(bounds.Right - radius, bounds.Top, radius, radius, 270, 90);
+                    path.AddArc(bounds.Right - radius, bounds.Bottom - radius, radius, radius, 0, 90);
+                    path.AddArc(bounds.Left, bounds.Bottom - radius, radius, radius, 90, 90);
+                    path.CloseFigure();
+                    graphics.FillPath(brush, path);
+                    DrawCategoryIcon(graphics, _category, bounds, _glyphColor, DeviceDpi / 96f);
+                }
+                e.Graphics.DrawImageUnscaled(_image, Point.Empty);
+            }
+
+            protected override void OnSizeChanged(EventArgs e)
+            {
+                base.OnSizeChanged(e);
+                ResetImage();
+            }
+
+            protected override void OnDpiChangedAfterParent(EventArgs e)
+            {
+                base.OnDpiChangedAfterParent(e);
+                ResetImage();
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) _image?.Dispose();
+                base.Dispose(disposing);
+            }
+
+            private void ResetImage()
+            {
+                _image?.Dispose();
+                _image = null;
+                Invalidate();
+            }
+        }
+
         private readonly NotifyIcon _tray;
         private readonly System.Windows.Forms.Timer _timer;
+        private readonly System.Windows.Forms.Timer _npuTimer;
         private readonly Computer _computer;
+        private readonly Control _dispatcher = new Control();
+        private readonly object _sampleLock = new();
+        private readonly object _npuLock = new();
+        private readonly object _logLock = new();
+        private readonly TaskCompletionSource<bool> _shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly ContextMenuStrip _menu;
         private readonly string _logPath;
         private readonly IconStyle _style;
@@ -47,8 +143,11 @@ namespace TaskbarTemp
         private Label _networkDownSpeed, _networkUpSpeed, _npuName, _npuUsageLabel;
         private bool _systemBackdropApplied;
         private bool _detailsDarkMode, _detailsHighContrast;
+        private int _detailsCardFillArgb, _detailsCardBorderArgb;
         private bool? _gpuTempRowVisible;
-        private readonly HashSet<string> _physicalNetworkNames;
+        private int _gpuTempMissingSamples;
+        private bool _hasGpuTempSample;
+        private readonly HashSet<string> _physicalNetworkNames = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _hardwareFailures = new(StringComparer.OrdinalIgnoreCase);
 
         private const int RefreshIntervalMs = 2000;
@@ -61,9 +160,11 @@ namespace TaskbarTemp
         private bool _loggedFirstRead;
         private bool _loggedNetworkRead, _loggedNpuRead;
         private bool _loggedNpuProbe;
-        private bool _exiting;
+        private volatile bool _exiting;
         private volatile bool _disposed;
-        private DateTime _nextNpuSampleUtc = DateTime.MinValue;
+        private bool _sampleRunning, _samplePending;
+        private bool _computerOpenAttempted, _shutdownStarted, _networkNamesLoaded;
+        private int _npuVisible, _npuGeneration, _npuWorkerRunning;
 
         private float? _temp;
         private float? _load;
@@ -91,7 +192,6 @@ namespace TaskbarTemp
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "TaskbarTemp", "run.log");
             try { Directory.CreateDirectory(Path.GetDirectoryName(_logPath)); } catch { }
-            _physicalNetworkNames = ReadPhysicalNetworkNames();
             try { SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged; }
             catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException || ex is InvalidOperationException)
             { Log("Theme change notifications unavailable: " + ex.Message); }
@@ -106,11 +206,10 @@ namespace TaskbarTemp
                 IsControllerEnabled = false,
                 IsNetworkEnabled = true
             };
-            try { _computer.Open(); Log("Computer.Open OK"); }
-            catch (Exception ex) { Log("Open failed: " + ex.Message); }
+            _ = _dispatcher.Handle;
 
             _menu = new ContextMenuStrip();
-            _menu.Items.Add("立即刷新", null, (s, e) => Refresh());
+            _menu.Items.Add("立即刷新", null, (s, e) => RequestSample());
             _menu.Items.Add("详情", null, (s, e) => ShowDetails());
             _menu.Items.Add("复制数值", null, (s, e) => CopyValue());
             _menu.Items.Add(new ToolStripSeparator());
@@ -132,17 +231,178 @@ namespace TaskbarTemp
             _tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowDetails(); };
 
             _timer = new System.Windows.Forms.Timer { Interval = RefreshIntervalMs };
-            _timer.Tick += (s, e) => Refresh();
+            _timer.Tick += (s, e) => RequestSample();
             _timer.Start();
 
-            Refresh();
+            _npuTimer = new System.Windows.Forms.Timer { Interval = NpuSampleIntervalMs };
+            _npuTimer.Tick += (s, e) => RequestNpuSample();
+
+            RequestSample();
             Log($"started (style={_style})");
         }
 
-        private void Refresh()
+        private void RequestSample()
+        {
+            lock (_sampleLock)
+            {
+                if (_exiting || _disposed) return;
+                if (_sampleRunning)
+                {
+                    _samplePending = true;
+                    return;
+                }
+                _sampleRunning = true;
+                StartSampleWorker();
+            }
+        }
+
+        private void RequestNpuSample()
+        {
+            int generation;
+            lock (_npuLock)
+            {
+                if (_exiting || _disposed || _npuVisible == 0 || _npuWorkerRunning != 0) return;
+                _npuWorkerRunning = 1;
+                generation = _npuGeneration;
+            }
+
+            StartNpuWorker(generation);
+        }
+
+        private void StartNpuWorker(int generation)
         {
             try
             {
+                _ = Task.Factory.StartNew<float?>(() =>
+                {
+                    lock (_npuLock)
+                        if (_exiting || _disposed || _npuVisible == 0 || generation != _npuGeneration) return null;
+                    return ReadNpuUsage();
+                }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)
+                    .ContinueWith(worker => CompleteNpuSample(worker, generation), TaskScheduler.Default);
+            }
+            catch (Exception ex)
+            {
+                int retryGeneration = 0;
+                bool retry = false;
+                lock (_npuLock)
+                {
+                    _npuWorkerRunning = 0;
+                    if (!_exiting && !_disposed && _npuVisible != 0 && generation != _npuGeneration)
+                    {
+                        _npuWorkerRunning = 1;
+                        retryGeneration = _npuGeneration;
+                        retry = true;
+                    }
+                }
+                Log("NPU sampling worker failed: " + ex.Message);
+                if (retry) StartNpuWorker(retryGeneration);
+            }
+        }
+
+        private void CompleteNpuSample(Task<float?> worker, int generation)
+        {
+            if (worker.Exception is Exception ex)
+                Log("NPU sampling worker failed: " + ex.GetBaseException().Message);
+
+            bool applySample;
+            bool startFollowUp = false;
+            int followUpGeneration = 0;
+            lock (_npuLock)
+            {
+                _npuWorkerRunning = 0;
+                int currentGeneration = _npuGeneration;
+                bool visible = _npuVisible != 0;
+                applySample = worker.Exception == null && !_exiting && !_disposed && visible &&
+                              generation == currentGeneration;
+
+                if (!_exiting && !_disposed && visible && generation != currentGeneration)
+                {
+                    _npuWorkerRunning = 1;
+                    followUpGeneration = currentGeneration;
+                    startFollowUp = true;
+                }
+            }
+
+            if (applySample)
+            {
+                try { _dispatcher.BeginInvoke((Action)(() => ApplyNpuSample(worker.Result, generation))); }
+                catch (InvalidOperationException) { }
+            }
+            if (startFollowUp) StartNpuWorker(followUpGeneration);
+        }
+
+        private void StartSampleWorker()
+            => _ = Task.Run(SampleLoop).ContinueWith(SampleWorkerCompleted, TaskScheduler.Default);
+
+        private void SampleWorkerCompleted(Task worker)
+        {
+            if (worker.Exception is Exception ex) Log("sampling worker task failed: " + ex.GetBaseException().Message);
+            bool finishShutdown = false;
+            lock (_sampleLock)
+            {
+                if (_exiting)
+                {
+                    _sampleRunning = false;
+                    finishShutdown = true;
+                }
+                else if (_samplePending)
+                    StartSampleWorker();
+                else _sampleRunning = false;
+            }
+            if (finishShutdown) FinishShutdown();
+        }
+
+        private void SampleLoop()
+        {
+            try
+            {
+                while (true)
+                {
+                    lock (_sampleLock)
+                    {
+                        if (_exiting) break;
+                        _samplePending = false;
+                    }
+
+                    var snapshot = SampleHardware();
+                    lock (_sampleLock)
+                    {
+                        if (_exiting) break;
+                        if (snapshot != null)
+                        {
+                            try { _dispatcher.BeginInvoke((Action)(() => ApplySnapshot(snapshot))); }
+                            catch (InvalidOperationException) { }
+                        }
+                        if (!_samplePending)
+                            return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("sampling worker failed: " + ex.Message);
+            }
+        }
+
+        private SampleSnapshot SampleHardware()
+        {
+            try
+            {
+                if (!_computerOpenAttempted)
+                {
+                    _computerOpenAttempted = true;
+                    try { _computer.Open(); Log("Computer.Open OK"); }
+                    catch (Exception ex) { Log("Open failed: " + ex.Message); }
+                }
+                if (_exiting) return null;
+                if (!_networkNamesLoaded)
+                {
+                    _physicalNetworkNames.UnionWith(ReadPhysicalNetworkNames());
+                    _networkNamesLoaded = true;
+                }
+                if (_exiting) return null;
+
                 float? t = null, load = null, clk = null;
                 string hwname = "";
 
@@ -153,6 +413,7 @@ namespace TaskbarTemp
 
                 foreach (var hw in _computer.Hardware)
                 {
+                    if (_exiting) return null;
                     try
                     {
                         hw.Update();
@@ -243,62 +504,84 @@ namespace TaskbarTemp
                     }
                 }
 
-                _temp = t; _load = load; _clock = clk; _hwName = hwname;
-                _gpuTemp = gpuTemp; _gpuLoad = gpuLoad; _vramUsed = vramUsed; _vramTotal = vramTotal; _gpuName = gpuName;
-                _memUsedGb = memUsedGb;
-                _memTotalGb = memTotalGb;
-                _networkDownloadBps = netDownload;
-                _networkUploadBps = netUpload;
-                var nowUtc = DateTime.UtcNow;
-                if (nowUtc >= _nextNpuSampleUtc)
-                {
-                    _npuUsage = ReadNpuUsage();
-                    _nextNpuSampleUtc = nowUtc.AddMilliseconds(NpuSampleIntervalMs);
-                    if (!_loggedNpuRead && _npuUsage.HasValue)
-                    {
-                        _loggedNpuRead = true;
-                        Log($"NPU counter OK: {_npuUsage.Value:0.0}%");
-                    }
-                }
-
                 if (t.HasValue)
                 {
                     if (!_loggedFirstRead)
                     {
                         _loggedFirstRead = true;
                         Log("physical network adapters: " + string.Join(", ", _physicalNetworkNames));
-                        Log($"first read OK: temp={t.Value:0.0}C gpu={(gpuLoad.HasValue ? gpuLoad.Value.ToString("0.0") + "%" : "n/a")} mem={(_memUsedGb.HasValue && _memTotalGb.HasValue ? $"{_memUsedGb.Value:0.0}/{_memTotalGb.Value:0.0}GB" : "n/a")} net=↓{FormatNetworkSpeed(netDownload)} ↑{FormatNetworkSpeed(netUpload)} npu={(_npuUsage.HasValue ? _npuUsage.Value.ToString("0.0") + "%" : "n/a")}");
+                        Log($"first read OK: temp={t.Value:0.0}C gpu={(gpuLoad.HasValue ? gpuLoad.Value.ToString("0.0") + "%" : "n/a")} mem={(memUsedGb.HasValue && memTotalGb.HasValue ? $"{memUsedGb.Value:0.0}/{memTotalGb.Value:0.0}GB" : "n/a")} net=↓{FormatNetworkSpeed(netDownload)} ↑{FormatNetworkSpeed(netUpload)}");
                     }
+                }
+                return new SampleSnapshot(t, load, clk, hwname, gpuTemp, gpuLoad, vramUsed, vramTotal,
+                    gpuName, memUsedGb, memTotalGb, netDownload, netUpload);
+            }
+            catch (Exception ex)
+            {
+                Log("refresh error: " + ex.Message);
+                return null;
+            }
+        }
 
-                    // 中值滤波：核心从 C-state 醒来瞬间传感器会报虚高尖峰（单采样毛刺），
-                    // 取最近 5 次读数的中位数显示，毛刺被滤掉，真实变化不受影响。
-                    float disp = FilterTemperature(t.Value);
-                    if (_tempSampleCount == _tempSamples.Length && Math.Abs(disp - t.Value) > 12f)
-                        Log($"spike filtered: raw={t.Value:0.0} -> shown={disp:0.0}");
+        private void ApplySnapshot(SampleSnapshot snapshot)
+        {
+            try
+            {
+                if (_exiting || _disposed) return;
+                _temp = snapshot.Temp; _load = snapshot.Load; _clock = snapshot.Clock; _hwName = snapshot.HwName;
+                _gpuTemp = snapshot.GpuTemp; _gpuLoad = snapshot.GpuLoad; _vramUsed = snapshot.VramUsed;
+                if (snapshot.GpuTemp.HasValue)
+                {
+                    _hasGpuTempSample = true;
+                    _gpuTempMissingSamples = 0;
+                }
+                else if (_hasGpuTempSample && _gpuTempMissingSamples < 3)
+                    _gpuTempMissingSamples++;
+                _vramTotal = snapshot.VramTotal; _gpuName = snapshot.GpuName;
+                _memUsedGb = snapshot.MemUsedGb; _memTotalGb = snapshot.MemTotalGb;
+                _networkDownloadBps = snapshot.NetworkDownload; _networkUploadBps = snapshot.NetworkUpload;
 
+                if (snapshot.Temp.HasValue)
+                {
+                    float disp = FilterTemperature(snapshot.Temp.Value);
+                    if (_tempSampleCount == _tempSamples.Length && Math.Abs(disp - snapshot.Temp.Value) > 12f)
+                        Log($"spike filtered: raw={snapshot.Temp.Value:0.0} -> shown={disp:0.0}");
                     string text = Math.Round(disp).ToString("0");
                     var accent = IconRenderer.ColorFor(disp);
-                    string key = text + "|" + accent.ToArgb() + "|" + _iconSize;
-                    ReplaceTrayIcon(text, accent, key);
-
-                    string tip = $"CPU {disp:0}°C{(load.HasValue ? $" {load.Value:0}%" : "")}";
-                    if (gpuTemp.HasValue) tip += $" GPU {gpuTemp.Value:0}°C";
-                    else if (gpuLoad.HasValue) tip += $" GPU {gpuLoad.Value:0}%";
-                    if (_memUsedGb.HasValue && _memTotalGb.HasValue)
-                        tip += $" 内存{_memUsedGb.Value:0.#}/{_memTotalGb.Value:0.#}G";
+                    ReplaceTrayIcon(text, accent, text + "|" + accent.ToArgb() + "|" + _iconSize);
+                    string tip = $"CPU {disp:0}°C{(snapshot.Load.HasValue ? $" {snapshot.Load.Value:0}%" : "")}";
+                    if (snapshot.GpuTemp.HasValue) tip += $" GPU {snapshot.GpuTemp.Value:0}°C";
+                    else if (snapshot.GpuLoad.HasValue) tip += $" GPU {snapshot.GpuLoad.Value:0}%";
+                    if (snapshot.MemUsedGb.HasValue && snapshot.MemTotalGb.HasValue)
+                        tip += $" 内存{snapshot.MemUsedGb.Value:0.#}/{snapshot.MemTotalGb.Value:0.#}G";
                     SetTip(tip);
                 }
                 else
                 {
                     ReplaceTrayIcon("--", IconRenderer.ColorFor(null), "nodata");
-                    SetTip("CPU 温度：读取不到（需管理员权限）");
+                    SetTip("CPU 温度：未读到，请检查驱动和管理员权限");
                 }
                 if (_details != null && !_details.IsDisposed && _details.Visible) UpdateDetails();
             }
-            catch (Exception ex)
+            catch (Exception ex) { Log("refresh error: " + ex.Message); }
+        }
+
+        private void ApplyNpuSample(float? usage, int generation)
+        {
+            try
             {
-                Log("refresh error: " + ex.Message);
+                if (_exiting || _disposed || Volatile.Read(ref _npuVisible) == 0 ||
+                    generation != Volatile.Read(ref _npuGeneration)) return;
+
+                _npuUsage = usage;
+                if (!_loggedNpuRead && usage.HasValue)
+                {
+                    _loggedNpuRead = true;
+                    Log($"NPU counter OK: {usage.Value:0.0}%");
+                }
+                if (_details != null && !_details.IsDisposed && _details.Visible) UpdateDetails();
             }
+            catch (Exception ex) { Log("refresh error: " + ex.Message); }
         }
 
         private void SetTip(string tip)
@@ -343,6 +626,7 @@ namespace TaskbarTemp
                 _gpuNameLabel = AddSection("GPU", new (string, string)[] { ("温度", ""), ("负载", ""), ("显存", "") }, out var gpuRows);
                 _gpuTempLabel = gpuRows[0]; _gpuLoadLabel = gpuRows[1]; _vramLabel = gpuRows[2];
                 _gpuTempCaption = (Label)((TableLayoutPanel)_gpuNameLabel.Parent).GetControlFromPosition(0, 1);
+                _gpuTempRowVisible = null;
 
                 _npuName = AddSection("NPU", new (string, string)[] { ("负载", "") }, out var npuRows);
                 _npuUsageLabel = npuRows[0];
@@ -358,6 +642,23 @@ namespace TaskbarTemp
                     PositionDetails(workingArea);
                 };
                 _details.FormClosing += (s, e) => { if (!_exiting) { e.Cancel = true; _details.Hide(); } };
+                _details.VisibleChanged += (s, e) =>
+                {
+                    bool visible = _details.Visible;
+                    lock (_npuLock)
+                    {
+                        Volatile.Write(ref _npuVisible, visible ? 1 : 0);
+                        Interlocked.Increment(ref _npuGeneration);
+                    }
+                    if (visible)
+                    {
+                        _npuUsage = null;
+                        UpdateDetails();
+                        _npuTimer.Start();
+                        RequestNpuSample();
+                    }
+                    else _npuTimer.Stop();
+                };
             }
 
             UpdateDetails();
@@ -371,9 +672,15 @@ namespace TaskbarTemp
 
         private void ApplyWindowStyle()
         {
+            bool previousBackdrop = _systemBackdropApplied;
             bool highContrast = _detailsHighContrast = System.Windows.Forms.SystemInformation.HighContrast;
             bool dark = IsDarkMode();
             _detailsDarkMode = dark;
+            int cardFillArgb = CardFillColor(highContrast, dark).ToArgb();
+            int cardBorderArgb = CardBorderColor(highContrast, dark).ToArgb();
+            bool cardColorsChanged = _detailsCardFillArgb != cardFillArgb || _detailsCardBorderArgb != cardBorderArgb;
+            _detailsCardFillArgb = cardFillArgb;
+            _detailsCardBorderArgb = cardBorderArgb;
             _systemBackdropApplied = false;
             if (!highContrast && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22621))
             {
@@ -412,6 +719,12 @@ namespace TaskbarTemp
             }
 
             ApplyDetailsTheme(highContrast, dark);
+            if (cardColorsChanged || previousBackdrop != _systemBackdropApplied)
+                foreach (Panel section in _detailsContent.Controls)
+                {
+                    section.Invalidate();
+                    section.Controls.OfType<BufferedCategoryIcon>().FirstOrDefault()?.Invalidate();
+                }
         }
 
         private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
@@ -423,7 +736,7 @@ namespace TaskbarTemp
                 {
                     if (_disposed || _details == null || _details.IsDisposed) return;
                     ApplyWindowStyle();
-                    _details.Invalidate(true);
+                    _details.Invalidate();
                 }));
             }
             catch (InvalidOperationException) { }
@@ -431,13 +744,14 @@ namespace TaskbarTemp
 
         private void ApplyDetailsTheme(bool highContrast, bool dark)
         {
-            Color primary = highContrast ? SystemColors.WindowText : dark ? Color.FromArgb(241, 244, 248) : SystemColors.ControlText;
-            Color secondary = highContrast ? SystemColors.GrayText : dark ? Color.FromArgb(181, 190, 202) : Color.FromArgb(96, 106, 119);
+            Color primary = Color.FromArgb((highContrast ? SystemColors.WindowText : dark ? Color.FromArgb(241, 244, 248) : SystemColors.ControlText).ToArgb());
+            Color secondary = Color.FromArgb((highContrast ? SystemColors.GrayText : dark ? Color.FromArgb(181, 190, 202) : Color.FromArgb(96, 106, 119)).ToArgb());
             foreach (Panel section in _detailsContent.Controls)
             {
-                section.Invalidate();
+                section.Controls.OfType<BufferedCategoryIcon>().FirstOrDefault()?.SetTheme(
+                    TileFillColor(highContrast, dark), AccentColor(highContrast, dark));
                 if (section.Controls.Count == 0) continue;
-                foreach (Control control in section.Controls[0].Controls)
+                foreach (Control control in section.Controls.OfType<TableLayoutPanel>().First().Controls)
                 {
                     if (control is Label label)
                         label.ForeColor = string.Equals(label.Tag as string, "caption", StringComparison.Ordinal) ? secondary : primary;
@@ -492,8 +806,10 @@ namespace TaskbarTemp
                 var neuralByAdapter = new Dictionary<string, Dictionary<string, float>>(StringComparer.OrdinalIgnoreCase);
                 var has3D = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                using var searcher = new ManagementObjectSearcher(
-                    "SELECT Name, UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%engtype_Neural%' OR Name LIKE '%engtype_3D%'");
+                using var searcher = new ManagementObjectSearcher("root\\CIMV2",
+                    "SELECT Name, UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%engtype_Neural%' OR Name LIKE '%engtype_3D%'",
+                    // shortcut: Timeout bounds collection enumeration, not a blocked Get(); revisit if Get() must be cancellable.
+                    new System.Management.EnumerationOptions { Timeout = TimeSpan.FromSeconds(5) });
                 using var instances = searcher.Get();
 
                 foreach (ManagementObject instance in instances)
@@ -642,19 +958,6 @@ namespace TaskbarTemp
             using var border = new Pen(CardBorderColor(_detailsHighContrast, _detailsDarkMode));
             e.Graphics.FillPath(fill, path);
             e.Graphics.DrawPath(border, path);
-
-            int tile = (int)(30 * scale), inset = (int)(10 * scale);
-            var tileBounds = new Rectangle(inset, inset, tile, tile);
-            using var tileBrush = new SolidBrush(TileFillColor(_detailsHighContrast, _detailsDarkMode));
-            using var tilePath = new GraphicsPath();
-            int radius = Math.Max(2, (int)(10 * scale));
-            tilePath.AddArc(tileBounds.Left, tileBounds.Top, radius, radius, 180, 90);
-            tilePath.AddArc(tileBounds.Right - radius, tileBounds.Top, radius, radius, 270, 90);
-            tilePath.AddArc(tileBounds.Right - radius, tileBounds.Bottom - radius, radius, radius, 0, 90);
-            tilePath.AddArc(tileBounds.Left, tileBounds.Bottom - radius, radius, radius, 90, 90);
-            tilePath.CloseFigure();
-            e.Graphics.FillPath(tileBrush, tilePath);
-            DrawCategoryIcon(e.Graphics, (string)panel.Tag, tileBounds, AccentColor(_detailsHighContrast, _detailsDarkMode), scale);
         }
 
         private static void DrawCategoryIcon(Graphics graphics, string category, Rectangle bounds, Color color, float scale)
@@ -702,7 +1005,7 @@ namespace TaskbarTemp
         }
         private Label AddSection(string tile, (string, string)[] rows, out Label[] values, bool withNetwork = false)
         {
-            var section = new Panel
+            var section = new BufferedSectionPanel
             {
                 BorderStyle = BorderStyle.None,
                 BackColor = Color.Transparent,
@@ -711,6 +1014,12 @@ namespace TaskbarTemp
                 Margin = new Padding(0, 0, 0, 8)
             };
             section.Paint += DrawRoundedPanel;
+
+            var icon = new BufferedCategoryIcon(tile, TileFillColor(_detailsHighContrast, _detailsDarkMode),
+                AccentColor(_detailsHighContrast, _detailsDarkMode))
+            {
+                Bounds = new Rectangle(10, 10, 30, 30)
+            };
 
             var layout = new TableLayoutPanel
             {
@@ -777,6 +1086,8 @@ namespace TaskbarTemp
             }
 
             section.Controls.Add(layout);
+            section.Controls.Add(icon);
+            icon.BringToFront();
             layout.Width = section.ClientSize.Width;
             layout.Height = layout.GetPreferredSize(new Size(layout.Width, 0)).Height;
             section.Height = layout.Height;
@@ -788,12 +1099,12 @@ namespace TaskbarTemp
         {
             bool layoutChanged = false;
             layoutChanged |= SetLabelText(_cpuName, string.IsNullOrEmpty(_hwName) ? "CPU" : _hwName);
-            layoutChanged |= SetLabelText(_cpuTemp, _temp.HasValue ? $"{_temp.Value:0.0} °C" : "未读到温度（请以管理员身份运行）");
+            layoutChanged |= SetLabelText(_cpuTemp, _temp.HasValue ? $"{_temp.Value:0.0} °C" : "未读到温度");
             layoutChanged |= SetLabelText(_cpuLoad, _load.HasValue ? $"{_load.Value:0} %" : "—");
             layoutChanged |= SetLabelText(_cpuClock, _clock.HasValue ? $"{_clock.Value / 1000f:0.00} GHz" : "—");
 
             layoutChanged |= SetLabelText(_gpuNameLabel, string.IsNullOrEmpty(_gpuName) ? "GPU" : _gpuName);
-            bool showGpuTemp = _gpuTemp.HasValue;
+            bool showGpuTemp = _gpuTemp.HasValue || (_hasGpuTempSample && _gpuTempMissingSamples < 3);
             if (_gpuTempRowVisible != showGpuTemp)
             {
                 _gpuTempCaption.Visible = showGpuTemp;
@@ -801,7 +1112,7 @@ namespace TaskbarTemp
                 _gpuTempRowVisible = showGpuTemp;
                 layoutChanged = true;
             }
-            if (showGpuTemp) layoutChanged |= SetLabelText(_gpuTempLabel, $"{_gpuTemp.Value:0.0} °C");
+            if (showGpuTemp) layoutChanged |= SetLabelText(_gpuTempLabel, _gpuTemp.HasValue ? $"{_gpuTemp.Value:0.0} °C" : "—");
             layoutChanged |= SetLabelText(_gpuLoadLabel, _gpuLoad.HasValue ? $"{_gpuLoad.Value:0.0} %" : "—");
             layoutChanged |= SetLabelText(_vramLabel, _vramUsed.HasValue && _vramTotal.HasValue
                 ? $"共享 {_vramUsed.Value / 1024f:0.0} / {_vramTotal.Value / 1024f:0.0} GB"
@@ -825,7 +1136,7 @@ namespace TaskbarTemp
             if (label == null || string.Equals(label.Text, text, StringComparison.Ordinal)) return false;
             Size preferredSize = label.GetPreferredSize(Size.Empty);
             label.Text = text;
-            return label.GetPreferredSize(Size.Empty) != preferredSize;
+            return label.GetPreferredSize(Size.Empty).Height != preferredSize.Height;
         }
 
         private void LayoutDetails()
@@ -836,7 +1147,9 @@ namespace TaskbarTemp
             foreach (Panel section in _detailsContent.Controls)
             {
                 section.Width = width;
-                var layout = (TableLayoutPanel)section.Controls[0];
+                var layout = section.Controls.OfType<TableLayoutPanel>().First();
+                var icon = section.Controls.OfType<BufferedCategoryIcon>().FirstOrDefault();
+                if (icon != null) icon.Bounds = new Rectangle(scale(10), scale(10), scale(30), scale(30));
                 layout.Width = width;
                 layout.Padding = new Padding(scale(44), scale(7), scale(8), scale(7));
                 layout.ColumnStyles[0].Width = scale(40);
@@ -942,34 +1255,70 @@ namespace TaskbarTemp
 
         private void ExitApp()
         {
-            _exiting = true;
             Log("exit");
             Dispose();
             ExitThread();
         }
 
-        private void Log(string m)
+        internal void Log(string m)
         {
+            lock (_logLock)
+            {
+                try
+                {
+                    if (File.Exists(_logPath) && new FileInfo(_logPath).Length > MaxLogBytes)
+                        File.Move(_logPath, _logPath + ".old", true);
+
+                    File.AppendAllText(_logPath,
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + m + Environment.NewLine);
+                }
+                catch { }
+            }
+        }
+
+        internal bool WaitForShutdown(TimeSpan timeout) => _shutdownCompletion.Task.Wait(timeout);
+
+        private void FinishShutdown()
+        {
+            lock (_sampleLock)
+            {
+                if (_shutdownStarted) return;
+                _shutdownStarted = true;
+            }
             try
             {
-                if (File.Exists(_logPath) && new FileInfo(_logPath).Length > MaxLogBytes)
-                    File.Move(_logPath, _logPath + ".old", true);
-
-                File.AppendAllText(_logPath,
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + m + Environment.NewLine);
+                if (_computerOpenAttempted) _computer.Close();
             }
-            catch { }
+            catch (Exception ex) { Log("Computer.Close failed: " + ex.Message); }
+            finally { _shutdownCompletion.TrySetResult(true); }
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing && !_disposed)
             {
-                _disposed = true;
+                bool closeComputer = false;
+                lock (_sampleLock)
+                {
+                    _exiting = true;
+                    _disposed = true;
+                    _samplePending = false;
+                    if (!_sampleRunning)
+                    {
+                        _sampleRunning = true;
+                        closeComputer = true;
+                    }
+                }
                 _timer?.Stop();
+                _npuTimer?.Stop();
                 SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
 
-                try { _computer?.Close(); } catch { }
+                if (closeComputer)
+                    _ = Task.Run(() =>
+                    {
+                        FinishShutdown();
+                        lock (_sampleLock) _sampleRunning = false;
+                    });
 
                 if (_tray != null)
                 {
@@ -984,6 +1333,8 @@ namespace TaskbarTemp
                 _menu?.Dispose();
                 _tray?.Dispose();
                 _timer?.Dispose();
+                _npuTimer?.Dispose();
+                _dispatcher.Dispose();
             }
 
             base.Dispose(disposing);

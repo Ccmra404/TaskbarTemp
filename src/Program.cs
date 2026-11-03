@@ -682,6 +682,11 @@ namespace TaskbarTemp
             _detailsCardFillArgb = cardFillArgb;
             _detailsCardBorderArgb = cardBorderArgb;
             _systemBackdropApplied = false;
+            if (highContrast && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22621))
+            {
+                int backdropType = 0; // DWMSBT_AUTO restores the system backdrop.
+                DwmSetWindowAttribute(_details.Handle, 38, ref backdropType, sizeof(int));
+            }
             if (!highContrast && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22621))
             {
                 int backdropType = 3; // DWMSBT_TRANSIENTWINDOW: Desktop Acrylic for a flyout.
@@ -701,7 +706,7 @@ namespace TaskbarTemp
 
             if (!_systemBackdropApplied)
             {
-                Color background = highContrast ? SystemColors.Window : dark ? Color.FromArgb(30, 33, 38) : Color.FromArgb(235, 240, 247);
+                Color background = highContrast ? SystemColors.Window : DetailsBackgroundColor(dark);
                 _details.BackColor = background;
                 _detailsContent.BackColor = background;
                 _details.Opacity = highContrast ? 1.0 : 0.97;
@@ -709,13 +714,11 @@ namespace TaskbarTemp
 
             if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
             {
-                if (!highContrast)
-                {
-                    int darkMode = dark ? 1 : 0;
-                    DwmSetWindowAttribute(_details.Handle, 20, ref darkMode, sizeof(int));
-                }
+                int darkMode = !highContrast && dark ? 1 : 0;
+                DwmSetWindowAttribute(_details.Handle, 20, ref darkMode, sizeof(int));
                 int preference = 2; // DWMWCP_ROUND
                 DwmSetWindowAttribute(_details.Handle, 33, ref preference, sizeof(int));
+                ApplyTitleBarColors(highContrast, dark);
             }
 
             ApplyDetailsTheme(highContrast, dark);
@@ -726,6 +729,21 @@ namespace TaskbarTemp
                     section.Controls.OfType<BufferedCategoryIcon>().FirstOrDefault()?.Invalidate();
                 }
         }
+
+        private void ApplyTitleBarColors(bool highContrast, bool dark)
+        {
+            int caption = highContrast ? -1 : ToColorRef(DetailsBackgroundColor(dark));
+            int border = highContrast ? -1 : ToColorRef(CardBorderColor(false, dark));
+            int text = highContrast ? -1 : ToColorRef(PrimaryTextColor(false, dark));
+            DwmSetWindowAttribute(_details.Handle, 34, ref border, sizeof(int));
+            DwmSetWindowAttribute(_details.Handle, 35, ref caption, sizeof(int));
+            DwmSetWindowAttribute(_details.Handle, 36, ref text, sizeof(int));
+        }
+
+        private static int ToColorRef(Color color) => color.R | (color.G << 8) | (color.B << 16);
+        private static Color DetailsBackgroundColor(bool dark) => dark ? Color.FromArgb(30, 33, 38) : Color.FromArgb(235, 240, 247);
+        private static Color PrimaryTextColor(bool highContrast, bool dark) =>
+            highContrast ? SystemColors.WindowText : dark ? Color.FromArgb(241, 244, 248) : SystemColors.ControlText;
 
         private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
         {
@@ -744,7 +762,7 @@ namespace TaskbarTemp
 
         private void ApplyDetailsTheme(bool highContrast, bool dark)
         {
-            Color primary = Color.FromArgb((highContrast ? SystemColors.WindowText : dark ? Color.FromArgb(241, 244, 248) : SystemColors.ControlText).ToArgb());
+            Color primary = Color.FromArgb(PrimaryTextColor(highContrast, dark).ToArgb());
             Color secondary = Color.FromArgb((highContrast ? SystemColors.GrayText : dark ? Color.FromArgb(181, 190, 202) : Color.FromArgb(96, 106, 119)).ToArgb());
             foreach (Panel section in _detailsContent.Controls)
             {

@@ -537,7 +537,7 @@ namespace TaskbarTemp
             e.Graphics.FillPath(fill, path);
             e.Graphics.DrawPath(border, path);
 
-            int tile = (int)(34 * scale), inset = (int)(12 * scale);
+            int tile = (int)(30 * scale), inset = (int)(10 * scale);
             var tileBounds = new Rectangle(inset, inset, tile, tile);
             using var tileBrush = new SolidBrush(System.Windows.Forms.SystemInformation.HighContrast ? SystemColors.Highlight : Color.FromArgb(226, 237, 252));
             using var tilePath = new GraphicsPath();
@@ -672,13 +672,13 @@ namespace TaskbarTemp
         {
             if (_detailsContent == null || _detailsContent.ClientSize.Width <= 0) return;
             int scale(int value) => (int)Math.Round(value * _detailsContent.DeviceDpi / 96.0);
-            int width = Math.Max(scale(200), _detailsContent.ClientSize.Width - _detailsContent.Padding.Horizontal - scale(36));
+            int width = Math.Max(scale(200), _detailsContent.ClientSize.Width - _detailsContent.Padding.Horizontal - scale(12));
             foreach (Panel section in _detailsContent.Controls)
             {
                 section.Width = width;
                 var layout = (TableLayoutPanel)section.Controls[0];
                 layout.Width = width;
-                layout.Padding = new Padding(scale(58), scale(10), scale(10), scale(10));
+                layout.Padding = new Padding(scale(52), scale(7), scale(8), scale(7));
                 layout.ColumnStyles[0].Width = scale(50);
                 layout.GetControlFromPosition(0, 0).MaximumSize = new Size(Math.Max(scale(80), width - layout.Padding.Horizontal), 0);
                 for (int row = 1; row < layout.RowCount; row++)
@@ -692,7 +692,7 @@ namespace TaskbarTemp
         private void FitDetailsToScreen(Rectangle area)
         {
             int scale(int value) => (int)Math.Round(value * _details.DeviceDpi / 96.0);
-            int width = Math.Min(scale(430), Math.Max(scale(280), area.Width - scale(24)));
+            int width = Math.Min(scale(360), Math.Max(scale(280), area.Width - scale(24)));
             _details.ClientSize = new Size(width, _details.ClientSize.Height);
             LayoutDetails();
             int contentHeight = _detailsContent.Padding.Vertical + _detailsContent.Controls

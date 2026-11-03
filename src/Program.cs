@@ -38,8 +38,7 @@ namespace TaskbarTemp
         private sealed record SampleSnapshot(
             float? Temp, float? Load, float? Clock, string HwName,
             float? GpuTemp, float? GpuLoad, float? VramUsed, float? VramTotal, string GpuName,
-            float? MemUsedGb, float? MemTotalGb, float? NetworkDownload, float? NetworkUpload,
-            float? NpuUsage, bool HasNpuSample, int NpuGeneration);
+            float? MemUsedGb, float? MemTotalGb, float? NetworkDownload, float? NetworkUpload);
 
         private sealed class BufferedSectionPanel : Panel
         {
@@ -129,6 +128,7 @@ namespace TaskbarTemp
         private readonly Computer _computer;
         private readonly Control _dispatcher = new Control();
         private readonly object _sampleLock = new();
+        private readonly object _npuLock = new();
         private readonly object _logLock = new();
         private readonly TaskCompletionSource<bool> _shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly ContextMenuStrip _menu;
@@ -162,10 +162,9 @@ namespace TaskbarTemp
         private bool _loggedNpuProbe;
         private volatile bool _exiting;
         private volatile bool _disposed;
-        private bool _sampleRunning, _samplePending, _sampleNpuPending;
+        private bool _sampleRunning, _samplePending;
         private bool _computerOpenAttempted, _shutdownStarted, _networkNamesLoaded;
-        private int _npuVisible, _npuGeneration;
-        private float? _sampleNpuUsage;
+        private int _npuVisible, _npuGeneration, _npuWorkerRunning;
 
         private float? _temp;
         private float? _load;
@@ -236,13 +235,13 @@ namespace TaskbarTemp
             _timer.Start();
 
             _npuTimer = new System.Windows.Forms.Timer { Interval = NpuSampleIntervalMs };
-            _npuTimer.Tick += (s, e) => RequestSample(includeNpu: true);
+            _npuTimer.Tick += (s, e) => RequestNpuSample();
 
             RequestSample();
             Log($"started (style={_style})");
         }
 
-        private void RequestSample(bool includeNpu = false)
+        private void RequestSample()
         {
             lock (_sampleLock)
             {
@@ -250,13 +249,87 @@ namespace TaskbarTemp
                 if (_sampleRunning)
                 {
                     _samplePending = true;
-                    _sampleNpuPending |= includeNpu;
                     return;
                 }
                 _sampleRunning = true;
-                _sampleNpuPending = includeNpu;
                 StartSampleWorker();
             }
+        }
+
+        private void RequestNpuSample()
+        {
+            int generation;
+            lock (_npuLock)
+            {
+                if (_exiting || _disposed || _npuVisible == 0 || _npuWorkerRunning != 0) return;
+                _npuWorkerRunning = 1;
+                generation = _npuGeneration;
+            }
+
+            StartNpuWorker(generation);
+        }
+
+        private void StartNpuWorker(int generation)
+        {
+            try
+            {
+                _ = Task.Factory.StartNew<float?>(() =>
+                {
+                    lock (_npuLock)
+                        if (_exiting || _disposed || _npuVisible == 0 || generation != _npuGeneration) return null;
+                    return ReadNpuUsage();
+                }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)
+                    .ContinueWith(worker => CompleteNpuSample(worker, generation), TaskScheduler.Default);
+            }
+            catch (Exception ex)
+            {
+                int retryGeneration = 0;
+                bool retry = false;
+                lock (_npuLock)
+                {
+                    _npuWorkerRunning = 0;
+                    if (!_exiting && !_disposed && _npuVisible != 0 && generation != _npuGeneration)
+                    {
+                        _npuWorkerRunning = 1;
+                        retryGeneration = _npuGeneration;
+                        retry = true;
+                    }
+                }
+                Log("NPU sampling worker failed: " + ex.Message);
+                if (retry) StartNpuWorker(retryGeneration);
+            }
+        }
+
+        private void CompleteNpuSample(Task<float?> worker, int generation)
+        {
+            if (worker.Exception is Exception ex)
+                Log("NPU sampling worker failed: " + ex.GetBaseException().Message);
+
+            bool applySample;
+            bool startFollowUp = false;
+            int followUpGeneration = 0;
+            lock (_npuLock)
+            {
+                _npuWorkerRunning = 0;
+                int currentGeneration = _npuGeneration;
+                bool visible = _npuVisible != 0;
+                applySample = worker.Exception == null && !_exiting && !_disposed && visible &&
+                              generation == currentGeneration;
+
+                if (!_exiting && !_disposed && visible && generation != currentGeneration)
+                {
+                    _npuWorkerRunning = 1;
+                    followUpGeneration = currentGeneration;
+                    startFollowUp = true;
+                }
+            }
+
+            if (applySample)
+            {
+                try { _dispatcher.BeginInvoke((Action)(() => ApplyNpuSample(worker.Result, generation))); }
+                catch (InvalidOperationException) { }
+            }
+            if (startFollowUp) StartNpuWorker(followUpGeneration);
         }
 
         private void StartSampleWorker()
@@ -286,16 +359,13 @@ namespace TaskbarTemp
             {
                 while (true)
                 {
-                    bool includeNpu;
                     lock (_sampleLock)
                     {
                         if (_exiting) break;
-                        includeNpu = _sampleNpuPending && Volatile.Read(ref _npuVisible) != 0;
-                        _sampleNpuPending = false;
                         _samplePending = false;
                     }
 
-                    var snapshot = SampleHardware(includeNpu);
+                    var snapshot = SampleHardware();
                     lock (_sampleLock)
                     {
                         if (_exiting) break;
@@ -315,7 +385,7 @@ namespace TaskbarTemp
             }
         }
 
-        private SampleSnapshot SampleHardware(bool includeNpu)
+        private SampleSnapshot SampleHardware()
         {
             try
             {
@@ -434,37 +504,17 @@ namespace TaskbarTemp
                     }
                 }
 
-                float? npu = null;
-                bool hasNpuSample = false;
-                int npuGeneration = Volatile.Read(ref _npuGeneration);
-                if (!_exiting && includeNpu && Volatile.Read(ref _npuVisible) != 0)
-                {
-                    npuGeneration = Volatile.Read(ref _npuGeneration);
-                    var sampledNpu = ReadNpuUsage();
-                    if (!_exiting && Volatile.Read(ref _npuVisible) != 0 &&
-                        npuGeneration == Volatile.Read(ref _npuGeneration))
-                    {
-                        _sampleNpuUsage = npu = sampledNpu;
-                        hasNpuSample = true;
-                        if (!_loggedNpuRead && npu.HasValue)
-                        {
-                            _loggedNpuRead = true;
-                            Log($"NPU counter OK: {npu.Value:0.0}%");
-                        }
-                    }
-                }
-
                 if (t.HasValue)
                 {
                     if (!_loggedFirstRead)
                     {
                         _loggedFirstRead = true;
                         Log("physical network adapters: " + string.Join(", ", _physicalNetworkNames));
-                        Log($"first read OK: temp={t.Value:0.0}C gpu={(gpuLoad.HasValue ? gpuLoad.Value.ToString("0.0") + "%" : "n/a")} mem={(memUsedGb.HasValue && memTotalGb.HasValue ? $"{memUsedGb.Value:0.0}/{memTotalGb.Value:0.0}GB" : "n/a")} net=↓{FormatNetworkSpeed(netDownload)} ↑{FormatNetworkSpeed(netUpload)} npu={(_sampleNpuUsage.HasValue ? _sampleNpuUsage.Value.ToString("0.0") + "%" : "n/a")}");
+                        Log($"first read OK: temp={t.Value:0.0}C gpu={(gpuLoad.HasValue ? gpuLoad.Value.ToString("0.0") + "%" : "n/a")} mem={(memUsedGb.HasValue && memTotalGb.HasValue ? $"{memUsedGb.Value:0.0}/{memTotalGb.Value:0.0}GB" : "n/a")} net=↓{FormatNetworkSpeed(netDownload)} ↑{FormatNetworkSpeed(netUpload)}");
                     }
                 }
                 return new SampleSnapshot(t, load, clk, hwname, gpuTemp, gpuLoad, vramUsed, vramTotal,
-                    gpuName, memUsedGb, memTotalGb, netDownload, netUpload, npu, hasNpuSample, npuGeneration);
+                    gpuName, memUsedGb, memTotalGb, netDownload, netUpload);
             }
             catch (Exception ex)
             {
@@ -490,9 +540,6 @@ namespace TaskbarTemp
                 _vramTotal = snapshot.VramTotal; _gpuName = snapshot.GpuName;
                 _memUsedGb = snapshot.MemUsedGb; _memTotalGb = snapshot.MemTotalGb;
                 _networkDownloadBps = snapshot.NetworkDownload; _networkUploadBps = snapshot.NetworkUpload;
-                if (snapshot.HasNpuSample && snapshot.NpuGeneration == Volatile.Read(ref _npuGeneration) &&
-                    Volatile.Read(ref _npuVisible) != 0)
-                    _npuUsage = snapshot.NpuUsage;
 
                 if (snapshot.Temp.HasValue)
                 {
@@ -513,6 +560,24 @@ namespace TaskbarTemp
                 {
                     ReplaceTrayIcon("--", IconRenderer.ColorFor(null), "nodata");
                     SetTip("CPU 温度：读取不到（需管理员权限）");
+                }
+                if (_details != null && !_details.IsDisposed && _details.Visible) UpdateDetails();
+            }
+            catch (Exception ex) { Log("refresh error: " + ex.Message); }
+        }
+
+        private void ApplyNpuSample(float? usage, int generation)
+        {
+            try
+            {
+                if (_exiting || _disposed || Volatile.Read(ref _npuVisible) == 0 ||
+                    generation != Volatile.Read(ref _npuGeneration)) return;
+
+                _npuUsage = usage;
+                if (!_loggedNpuRead && usage.HasValue)
+                {
+                    _loggedNpuRead = true;
+                    Log($"NPU counter OK: {usage.Value:0.0}%");
                 }
                 if (_details != null && !_details.IsDisposed && _details.Visible) UpdateDetails();
             }
@@ -580,14 +645,17 @@ namespace TaskbarTemp
                 _details.VisibleChanged += (s, e) =>
                 {
                     bool visible = _details.Visible;
-                    Volatile.Write(ref _npuVisible, visible ? 1 : 0);
-                    Interlocked.Increment(ref _npuGeneration);
+                    lock (_npuLock)
+                    {
+                        Volatile.Write(ref _npuVisible, visible ? 1 : 0);
+                        Interlocked.Increment(ref _npuGeneration);
+                    }
                     if (visible)
                     {
                         _npuUsage = null;
                         UpdateDetails();
                         _npuTimer.Start();
-                        RequestSample(includeNpu: true);
+                        RequestNpuSample();
                     }
                     else _npuTimer.Stop();
                 };
@@ -738,8 +806,10 @@ namespace TaskbarTemp
                 var neuralByAdapter = new Dictionary<string, Dictionary<string, float>>(StringComparer.OrdinalIgnoreCase);
                 var has3D = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                using var searcher = new ManagementObjectSearcher(
-                    "SELECT Name, UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%engtype_Neural%' OR Name LIKE '%engtype_3D%'");
+                using var searcher = new ManagementObjectSearcher("root\\CIMV2",
+                    "SELECT Name, UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%engtype_Neural%' OR Name LIKE '%engtype_3D%'",
+                    // shortcut: Timeout bounds collection enumeration, not a blocked Get(); revisit if Get() must be cancellable.
+                    new System.Management.EnumerationOptions { Timeout = TimeSpan.FromSeconds(5) });
                 using var instances = searcher.Get();
 
                 foreach (ManagementObject instance in instances)
@@ -1233,7 +1303,6 @@ namespace TaskbarTemp
                     _exiting = true;
                     _disposed = true;
                     _samplePending = false;
-                    _sampleNpuPending = false;
                     if (!_sampleRunning)
                     {
                         _sampleRunning = true;

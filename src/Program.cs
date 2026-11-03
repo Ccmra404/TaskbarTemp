@@ -43,7 +43,7 @@ namespace TaskbarTemp
         private Label _cpuName, _cpuTemp, _cpuLoad, _cpuClock;
         private Label _gpuNameLabel, _gpuTempLabel, _gpuLoadLabel, _vramLabel;
         private Label _memoryLabel, _memoryValue;
-        private Label _networkSpeed, _npuName, _npuUsageLabel;
+        private Label _networkDownSpeed, _networkUpSpeed, _npuName, _npuUsageLabel;
         private readonly HashSet<string> _physicalNetworkNames;
         private readonly HashSet<string> _hardwareFailures = new(StringComparer.OrdinalIgnoreCase);
 
@@ -333,8 +333,12 @@ namespace TaskbarTemp
                 _cpuName = AddSection(new (string, string)[] { ("温度", ""), ("负载", ""), ("频率", "") }, out var cpuRows, true);
                 _cpuTemp = cpuRows[0]; _cpuLoad = cpuRows[1]; _cpuClock = cpuRows[2];
 
-                _gpuNameLabel = AddSection(new (string, string)[] { ("温度", ""), ("负载", ""), ("显存", "") }, out var gpuRows);
-                _gpuTempLabel = gpuRows[0]; _gpuLoadLabel = gpuRows[1]; _vramLabel = gpuRows[2];
+                _gpuNameLabel = AddSection(_gpuTemp.HasValue
+                    ? new (string, string)[] { ("温度", ""), ("负载", ""), ("显存", "") }
+                    : new (string, string)[] { ("负载", ""), ("显存", "") }, out var gpuRows);
+                int gpuRow = 0;
+                _gpuTempLabel = _gpuTemp.HasValue ? gpuRows[gpuRow++] : null;
+                _gpuLoadLabel = gpuRows[gpuRow++]; _vramLabel = gpuRows[gpuRow];
 
                 _npuName = AddSection(new (string, string)[] { ("负载", "") }, out var npuRows);
                 _npuUsageLabel = npuRows[0];
@@ -547,13 +551,20 @@ namespace TaskbarTemp
             var layout = new TableLayoutPanel
             {
                 AutoSize = false,
-                ColumnCount = 2,
-                RowCount = rows.Length + (withNetwork ? 2 : 1),
+                ColumnCount = withNetwork ? 4 : 2,
+                RowCount = rows.Length + 1,
                 Dock = DockStyle.Top,
                 Padding = new Padding(4)
             };
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
+            layout.ColumnStyles.Add(withNetwork
+                ? new ColumnStyle(SizeType.Absolute, 110)
+                : new ColumnStyle(SizeType.Percent, 100));
+            if (withNetwork)
+            {
+                layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
+                layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            }
 
             var name = new Label
             {
@@ -565,11 +576,8 @@ namespace TaskbarTemp
                 Margin = new Padding(3, 2, 3, 4)
             };
             layout.Controls.Add(name, 0, 0);
-            layout.SetColumnSpan(name, 2);
+            layout.SetColumnSpan(name, withNetwork ? 4 : 2);
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
-            if (withNetwork)
-                _networkSpeed = new Label { AutoSize = true, Anchor = AnchorStyles.Left, MaximumSize = new Size(285, 0), Margin = new Padding(3, 1, 3, 1) };
 
             values = new Label[rows.Length];
             for (int i = 0; i < rows.Length; i++)
@@ -589,7 +597,7 @@ namespace TaskbarTemp
                 {
                     Text = "—",
                     AutoSize = true,
-                    MaximumSize = new Size(285, 0),
+                    MaximumSize = new Size(withNetwork ? 110 : 285, 0),
                     Anchor = AnchorStyles.Left,
                     Margin = new Padding(3, 2, 3, 2)
                 };
@@ -598,10 +606,15 @@ namespace TaskbarTemp
 
             if (withNetwork)
             {
-                int networkRow = rows.Length + 1;
-                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-                layout.Controls.Add(new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 1, 6, 1) }, 0, networkRow);
-                layout.Controls.Add(_networkSpeed, 1, networkRow);
+                var networkLabel = new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 2, 3, 2) };
+                layout.Controls.Add(networkLabel, 2, 1);
+                layout.SetColumnSpan(networkLabel, 2);
+                layout.Controls.Add(new Label { Text = "↓", AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 2, 3, 2) }, 2, 2);
+                _networkDownSpeed = new Label { AutoSize = true, MaximumSize = new Size(285, 0), Anchor = AnchorStyles.Left, Margin = new Padding(3, 2, 3, 2) };
+                layout.Controls.Add(_networkDownSpeed, 3, 2);
+                layout.Controls.Add(new Label { Text = "↑", AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 2, 3, 2) }, 2, 3);
+                _networkUpSpeed = new Label { AutoSize = true, MaximumSize = new Size(285, 0), Anchor = AnchorStyles.Left, Margin = new Padding(3, 2, 3, 2) };
+                layout.Controls.Add(_networkUpSpeed, 3, 3);
             }
 
             section.Controls.Add(layout);
@@ -632,7 +645,8 @@ namespace TaskbarTemp
                 ? $"{_memUsedGb.Value:0.0} / {_memTotalGb.Value:0.0} GB"
                 : "—");
 
-            SetLabelText(_networkSpeed, $"↓ {FormatNetworkSpeed(_networkDownloadBps)}   ↑ {FormatNetworkSpeed(_networkUploadBps)}");
+            SetLabelText(_networkDownSpeed, FormatNetworkSpeed(_networkDownloadBps));
+            SetLabelText(_networkUpSpeed, FormatNetworkSpeed(_networkUploadBps));
 
             SetLabelText(_npuName, "NPU");
             SetLabelText(_npuUsageLabel, _npuUsage.HasValue ? $"{_npuUsage.Value:0.0} %" : "—");

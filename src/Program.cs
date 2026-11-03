@@ -26,15 +26,29 @@ namespace TaskbarTemp
 
             Settings.EnsureDefault();
             ApplicationConfiguration.Initialize();
-            Application.Run(new TrayContext());
+            var context = new TrayContext();
+            Application.Run(context);
+            if (!context.WaitForShutdown(TimeSpan.FromSeconds(5)))
+                context.Log("shutdown timed out; process is leaving without waiting for the blocked sampler");
         }
     }
 
     internal sealed class TrayContext : ApplicationContext
     {
+        private sealed record SampleSnapshot(
+            float? Temp, float? Load, float? Clock, string HwName,
+            float? GpuTemp, float? GpuLoad, float? VramUsed, float? VramTotal, string GpuName,
+            float? MemUsedGb, float? MemTotalGb, float? NetworkDownload, float? NetworkUpload,
+            float? NpuUsage, bool HasNpuSample, int NpuGeneration);
+
         private readonly NotifyIcon _tray;
         private readonly System.Windows.Forms.Timer _timer;
+        private readonly System.Windows.Forms.Timer _npuTimer;
         private readonly Computer _computer;
+        private readonly Control _dispatcher = new Control();
+        private readonly object _sampleLock = new();
+        private readonly object _logLock = new();
+        private readonly TaskCompletionSource<bool> _shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly ContextMenuStrip _menu;
         private readonly string _logPath;
         private readonly IconStyle _style;
@@ -48,7 +62,7 @@ namespace TaskbarTemp
         private bool _systemBackdropApplied;
         private bool _detailsDarkMode, _detailsHighContrast;
         private bool? _gpuTempRowVisible;
-        private readonly HashSet<string> _physicalNetworkNames;
+        private readonly HashSet<string> _physicalNetworkNames = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _hardwareFailures = new(StringComparer.OrdinalIgnoreCase);
 
         private const int RefreshIntervalMs = 2000;
@@ -61,9 +75,12 @@ namespace TaskbarTemp
         private bool _loggedFirstRead;
         private bool _loggedNetworkRead, _loggedNpuRead;
         private bool _loggedNpuProbe;
-        private bool _exiting;
+        private volatile bool _exiting;
         private volatile bool _disposed;
-        private DateTime _nextNpuSampleUtc = DateTime.MinValue;
+        private bool _sampleRunning, _samplePending, _sampleNpuPending;
+        private bool _computerOpenAttempted, _shutdownStarted, _networkNamesLoaded;
+        private int _npuVisible, _npuGeneration;
+        private float? _sampleNpuUsage;
 
         private float? _temp;
         private float? _load;
@@ -91,7 +108,6 @@ namespace TaskbarTemp
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "TaskbarTemp", "run.log");
             try { Directory.CreateDirectory(Path.GetDirectoryName(_logPath)); } catch { }
-            _physicalNetworkNames = ReadPhysicalNetworkNames();
             try { SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged; }
             catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException || ex is InvalidOperationException)
             { Log("Theme change notifications unavailable: " + ex.Message); }
@@ -106,11 +122,10 @@ namespace TaskbarTemp
                 IsControllerEnabled = false,
                 IsNetworkEnabled = true
             };
-            try { _computer.Open(); Log("Computer.Open OK"); }
-            catch (Exception ex) { Log("Open failed: " + ex.Message); }
+            _ = _dispatcher.Handle;
 
             _menu = new ContextMenuStrip();
-            _menu.Items.Add("立即刷新", null, (s, e) => Refresh());
+            _menu.Items.Add("立即刷新", null, (s, e) => RequestSample());
             _menu.Items.Add("详情", null, (s, e) => ShowDetails());
             _menu.Items.Add("复制数值", null, (s, e) => CopyValue());
             _menu.Items.Add(new ToolStripSeparator());
@@ -132,17 +147,107 @@ namespace TaskbarTemp
             _tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowDetails(); };
 
             _timer = new System.Windows.Forms.Timer { Interval = RefreshIntervalMs };
-            _timer.Tick += (s, e) => Refresh();
+            _timer.Tick += (s, e) => RequestSample();
             _timer.Start();
 
-            Refresh();
+            _npuTimer = new System.Windows.Forms.Timer { Interval = NpuSampleIntervalMs };
+            _npuTimer.Tick += (s, e) => RequestSample(includeNpu: true);
+
+            RequestSample();
             Log($"started (style={_style})");
         }
 
-        private void Refresh()
+        private void RequestSample(bool includeNpu = false)
+        {
+            lock (_sampleLock)
+            {
+                if (_exiting || _disposed) return;
+                if (_sampleRunning)
+                {
+                    _samplePending = true;
+                    _sampleNpuPending |= includeNpu;
+                    return;
+                }
+                _sampleRunning = true;
+                _sampleNpuPending = includeNpu;
+                StartSampleWorker();
+            }
+        }
+
+        private void StartSampleWorker()
+            => _ = Task.Run(SampleLoop).ContinueWith(SampleWorkerCompleted, TaskScheduler.Default);
+
+        private void SampleWorkerCompleted(Task worker)
+        {
+            if (worker.Exception is Exception ex) Log("sampling worker task failed: " + ex.GetBaseException().Message);
+            bool finishShutdown = false;
+            lock (_sampleLock)
+            {
+                if (_exiting)
+                {
+                    _sampleRunning = false;
+                    finishShutdown = true;
+                }
+                else if (_samplePending)
+                    StartSampleWorker();
+                else _sampleRunning = false;
+            }
+            if (finishShutdown) FinishShutdown();
+        }
+
+        private void SampleLoop()
         {
             try
             {
+                while (true)
+                {
+                    bool includeNpu;
+                    lock (_sampleLock)
+                    {
+                        if (_exiting) break;
+                        includeNpu = _sampleNpuPending && Volatile.Read(ref _npuVisible) != 0;
+                        _sampleNpuPending = false;
+                        _samplePending = false;
+                    }
+
+                    var snapshot = SampleHardware(includeNpu);
+                    lock (_sampleLock)
+                    {
+                        if (_exiting) break;
+                        if (snapshot != null)
+                        {
+                            try { _dispatcher.BeginInvoke((Action)(() => ApplySnapshot(snapshot))); }
+                            catch (InvalidOperationException) { }
+                        }
+                        if (!_samplePending)
+                            return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("sampling worker failed: " + ex.Message);
+            }
+        }
+
+        private SampleSnapshot SampleHardware(bool includeNpu)
+        {
+            try
+            {
+                if (!_computerOpenAttempted)
+                {
+                    _computerOpenAttempted = true;
+                    try { _computer.Open(); Log("Computer.Open OK"); }
+                    catch (Exception ex) { Log("Open failed: " + ex.Message); }
+                }
+                if (_exiting) return null;
+                if (!_networkNamesLoaded)
+                {
+                    _physicalNetworkNames.UnionWith(ReadPhysicalNetworkNames());
+                    _networkNamesLoaded = true;
+                }
+                if (_exiting) return null;
+
                 float? t = null, load = null, clk = null;
                 string hwname = "";
 
@@ -153,6 +258,7 @@ namespace TaskbarTemp
 
                 foreach (var hw in _computer.Hardware)
                 {
+                    if (_exiting) return null;
                     try
                     {
                         hw.Update();
@@ -243,21 +349,23 @@ namespace TaskbarTemp
                     }
                 }
 
-                _temp = t; _load = load; _clock = clk; _hwName = hwname;
-                _gpuTemp = gpuTemp; _gpuLoad = gpuLoad; _vramUsed = vramUsed; _vramTotal = vramTotal; _gpuName = gpuName;
-                _memUsedGb = memUsedGb;
-                _memTotalGb = memTotalGb;
-                _networkDownloadBps = netDownload;
-                _networkUploadBps = netUpload;
-                var nowUtc = DateTime.UtcNow;
-                if (nowUtc >= _nextNpuSampleUtc)
+                float? npu = null;
+                bool hasNpuSample = false;
+                int npuGeneration = Volatile.Read(ref _npuGeneration);
+                if (!_exiting && includeNpu && Volatile.Read(ref _npuVisible) != 0)
                 {
-                    _npuUsage = ReadNpuUsage();
-                    _nextNpuSampleUtc = nowUtc.AddMilliseconds(NpuSampleIntervalMs);
-                    if (!_loggedNpuRead && _npuUsage.HasValue)
+                    npuGeneration = Volatile.Read(ref _npuGeneration);
+                    var sampledNpu = ReadNpuUsage();
+                    if (!_exiting && Volatile.Read(ref _npuVisible) != 0 &&
+                        npuGeneration == Volatile.Read(ref _npuGeneration))
                     {
-                        _loggedNpuRead = true;
-                        Log($"NPU counter OK: {_npuUsage.Value:0.0}%");
+                        _sampleNpuUsage = npu = sampledNpu;
+                        hasNpuSample = true;
+                        if (!_loggedNpuRead && npu.HasValue)
+                        {
+                            _loggedNpuRead = true;
+                            Log($"NPU counter OK: {npu.Value:0.0}%");
+                        }
                     }
                 }
 
@@ -267,25 +375,46 @@ namespace TaskbarTemp
                     {
                         _loggedFirstRead = true;
                         Log("physical network adapters: " + string.Join(", ", _physicalNetworkNames));
-                        Log($"first read OK: temp={t.Value:0.0}C gpu={(gpuLoad.HasValue ? gpuLoad.Value.ToString("0.0") + "%" : "n/a")} mem={(_memUsedGb.HasValue && _memTotalGb.HasValue ? $"{_memUsedGb.Value:0.0}/{_memTotalGb.Value:0.0}GB" : "n/a")} net=↓{FormatNetworkSpeed(netDownload)} ↑{FormatNetworkSpeed(netUpload)} npu={(_npuUsage.HasValue ? _npuUsage.Value.ToString("0.0") + "%" : "n/a")}");
+                        Log($"first read OK: temp={t.Value:0.0}C gpu={(gpuLoad.HasValue ? gpuLoad.Value.ToString("0.0") + "%" : "n/a")} mem={(memUsedGb.HasValue && memTotalGb.HasValue ? $"{memUsedGb.Value:0.0}/{memTotalGb.Value:0.0}GB" : "n/a")} net=↓{FormatNetworkSpeed(netDownload)} ↑{FormatNetworkSpeed(netUpload)} npu={(_sampleNpuUsage.HasValue ? _sampleNpuUsage.Value.ToString("0.0") + "%" : "n/a")}");
                     }
+                }
+                return new SampleSnapshot(t, load, clk, hwname, gpuTemp, gpuLoad, vramUsed, vramTotal,
+                    gpuName, memUsedGb, memTotalGb, netDownload, netUpload, npu, hasNpuSample, npuGeneration);
+            }
+            catch (Exception ex)
+            {
+                Log("refresh error: " + ex.Message);
+                return null;
+            }
+        }
 
-                    // 中值滤波：核心从 C-state 醒来瞬间传感器会报虚高尖峰（单采样毛刺），
-                    // 取最近 5 次读数的中位数显示，毛刺被滤掉，真实变化不受影响。
-                    float disp = FilterTemperature(t.Value);
-                    if (_tempSampleCount == _tempSamples.Length && Math.Abs(disp - t.Value) > 12f)
-                        Log($"spike filtered: raw={t.Value:0.0} -> shown={disp:0.0}");
+        private void ApplySnapshot(SampleSnapshot snapshot)
+        {
+            try
+            {
+                if (_exiting || _disposed) return;
+                _temp = snapshot.Temp; _load = snapshot.Load; _clock = snapshot.Clock; _hwName = snapshot.HwName;
+                _gpuTemp = snapshot.GpuTemp; _gpuLoad = snapshot.GpuLoad; _vramUsed = snapshot.VramUsed;
+                _vramTotal = snapshot.VramTotal; _gpuName = snapshot.GpuName;
+                _memUsedGb = snapshot.MemUsedGb; _memTotalGb = snapshot.MemTotalGb;
+                _networkDownloadBps = snapshot.NetworkDownload; _networkUploadBps = snapshot.NetworkUpload;
+                if (snapshot.HasNpuSample && snapshot.NpuGeneration == Volatile.Read(ref _npuGeneration) &&
+                    Volatile.Read(ref _npuVisible) != 0)
+                    _npuUsage = snapshot.NpuUsage;
 
+                if (snapshot.Temp.HasValue)
+                {
+                    float disp = FilterTemperature(snapshot.Temp.Value);
+                    if (_tempSampleCount == _tempSamples.Length && Math.Abs(disp - snapshot.Temp.Value) > 12f)
+                        Log($"spike filtered: raw={snapshot.Temp.Value:0.0} -> shown={disp:0.0}");
                     string text = Math.Round(disp).ToString("0");
                     var accent = IconRenderer.ColorFor(disp);
-                    string key = text + "|" + accent.ToArgb() + "|" + _iconSize;
-                    ReplaceTrayIcon(text, accent, key);
-
-                    string tip = $"CPU {disp:0}°C{(load.HasValue ? $" {load.Value:0}%" : "")}";
-                    if (gpuTemp.HasValue) tip += $" GPU {gpuTemp.Value:0}°C";
-                    else if (gpuLoad.HasValue) tip += $" GPU {gpuLoad.Value:0}%";
-                    if (_memUsedGb.HasValue && _memTotalGb.HasValue)
-                        tip += $" 内存{_memUsedGb.Value:0.#}/{_memTotalGb.Value:0.#}G";
+                    ReplaceTrayIcon(text, accent, text + "|" + accent.ToArgb() + "|" + _iconSize);
+                    string tip = $"CPU {disp:0}°C{(snapshot.Load.HasValue ? $" {snapshot.Load.Value:0}%" : "")}";
+                    if (snapshot.GpuTemp.HasValue) tip += $" GPU {snapshot.GpuTemp.Value:0}°C";
+                    else if (snapshot.GpuLoad.HasValue) tip += $" GPU {snapshot.GpuLoad.Value:0}%";
+                    if (snapshot.MemUsedGb.HasValue && snapshot.MemTotalGb.HasValue)
+                        tip += $" 内存{snapshot.MemUsedGb.Value:0.#}/{snapshot.MemTotalGb.Value:0.#}G";
                     SetTip(tip);
                 }
                 else
@@ -295,10 +424,7 @@ namespace TaskbarTemp
                 }
                 if (_details != null && !_details.IsDisposed && _details.Visible) UpdateDetails();
             }
-            catch (Exception ex)
-            {
-                Log("refresh error: " + ex.Message);
-            }
+            catch (Exception ex) { Log("refresh error: " + ex.Message); }
         }
 
         private void SetTip(string tip)
@@ -358,6 +484,20 @@ namespace TaskbarTemp
                     PositionDetails(workingArea);
                 };
                 _details.FormClosing += (s, e) => { if (!_exiting) { e.Cancel = true; _details.Hide(); } };
+                _details.VisibleChanged += (s, e) =>
+                {
+                    bool visible = _details.Visible;
+                    Volatile.Write(ref _npuVisible, visible ? 1 : 0);
+                    Interlocked.Increment(ref _npuGeneration);
+                    if (visible)
+                    {
+                        _npuUsage = null;
+                        UpdateDetails();
+                        _npuTimer.Start();
+                        RequestSample(includeNpu: true);
+                    }
+                    else _npuTimer.Stop();
+                };
             }
 
             UpdateDetails();
@@ -942,34 +1082,71 @@ namespace TaskbarTemp
 
         private void ExitApp()
         {
-            _exiting = true;
             Log("exit");
             Dispose();
             ExitThread();
         }
 
-        private void Log(string m)
+        internal void Log(string m)
         {
+            lock (_logLock)
+            {
+                try
+                {
+                    if (File.Exists(_logPath) && new FileInfo(_logPath).Length > MaxLogBytes)
+                        File.Move(_logPath, _logPath + ".old", true);
+
+                    File.AppendAllText(_logPath,
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + m + Environment.NewLine);
+                }
+                catch { }
+            }
+        }
+
+        internal bool WaitForShutdown(TimeSpan timeout) => _shutdownCompletion.Task.Wait(timeout);
+
+        private void FinishShutdown()
+        {
+            lock (_sampleLock)
+            {
+                if (_shutdownStarted) return;
+                _shutdownStarted = true;
+            }
             try
             {
-                if (File.Exists(_logPath) && new FileInfo(_logPath).Length > MaxLogBytes)
-                    File.Move(_logPath, _logPath + ".old", true);
-
-                File.AppendAllText(_logPath,
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + m + Environment.NewLine);
+                if (_computerOpenAttempted) _computer.Close();
             }
-            catch { }
+            catch (Exception ex) { Log("Computer.Close failed: " + ex.Message); }
+            finally { _shutdownCompletion.TrySetResult(true); }
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing && !_disposed)
             {
-                _disposed = true;
+                bool closeComputer = false;
+                lock (_sampleLock)
+                {
+                    _exiting = true;
+                    _disposed = true;
+                    _samplePending = false;
+                    _sampleNpuPending = false;
+                    if (!_sampleRunning)
+                    {
+                        _sampleRunning = true;
+                        closeComputer = true;
+                    }
+                }
                 _timer?.Stop();
+                _npuTimer?.Stop();
                 SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
 
-                try { _computer?.Close(); } catch { }
+                if (closeComputer)
+                    _ = Task.Run(() =>
+                    {
+                        FinishShutdown();
+                        lock (_sampleLock) _sampleRunning = false;
+                    });
 
                 if (_tray != null)
                 {
@@ -984,6 +1161,8 @@ namespace TaskbarTemp
                 _menu?.Dispose();
                 _tray?.Dispose();
                 _timer?.Dispose();
+                _npuTimer?.Dispose();
+                _dispatcher.Dispose();
             }
 
             base.Dispose(disposing);

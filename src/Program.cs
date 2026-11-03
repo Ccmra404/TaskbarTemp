@@ -41,6 +41,12 @@ namespace TaskbarTemp
             float? MemUsedGb, float? MemTotalGb, float? NetworkDownload, float? NetworkUpload,
             float? NpuUsage, bool HasNpuSample, int NpuGeneration);
 
+        private sealed class BufferedSectionPanel : Panel
+        {
+            public BufferedSectionPanel()
+                => SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
         private readonly NotifyIcon _tray;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly System.Windows.Forms.Timer _npuTimer;
@@ -62,6 +68,8 @@ namespace TaskbarTemp
         private bool _systemBackdropApplied;
         private bool _detailsDarkMode, _detailsHighContrast;
         private bool? _gpuTempRowVisible;
+        private int _gpuTempMissingSamples;
+        private bool _hasGpuTempSample;
         private readonly HashSet<string> _physicalNetworkNames = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _hardwareFailures = new(StringComparer.OrdinalIgnoreCase);
 
@@ -395,6 +403,13 @@ namespace TaskbarTemp
                 if (_exiting || _disposed) return;
                 _temp = snapshot.Temp; _load = snapshot.Load; _clock = snapshot.Clock; _hwName = snapshot.HwName;
                 _gpuTemp = snapshot.GpuTemp; _gpuLoad = snapshot.GpuLoad; _vramUsed = snapshot.VramUsed;
+                if (snapshot.GpuTemp.HasValue)
+                {
+                    _hasGpuTempSample = true;
+                    _gpuTempMissingSamples = 0;
+                }
+                else if (_hasGpuTempSample && _gpuTempMissingSamples < 3)
+                    _gpuTempMissingSamples++;
                 _vramTotal = snapshot.VramTotal; _gpuName = snapshot.GpuName;
                 _memUsedGb = snapshot.MemUsedGb; _memTotalGb = snapshot.MemTotalGb;
                 _networkDownloadBps = snapshot.NetworkDownload; _networkUploadBps = snapshot.NetworkUpload;
@@ -469,6 +484,7 @@ namespace TaskbarTemp
                 _gpuNameLabel = AddSection("GPU", new (string, string)[] { ("温度", ""), ("负载", ""), ("显存", "") }, out var gpuRows);
                 _gpuTempLabel = gpuRows[0]; _gpuLoadLabel = gpuRows[1]; _vramLabel = gpuRows[2];
                 _gpuTempCaption = (Label)((TableLayoutPanel)_gpuNameLabel.Parent).GetControlFromPosition(0, 1);
+                _gpuTempRowVisible = null;
 
                 _npuName = AddSection("NPU", new (string, string)[] { ("负载", "") }, out var npuRows);
                 _npuUsageLabel = npuRows[0];
@@ -842,7 +858,7 @@ namespace TaskbarTemp
         }
         private Label AddSection(string tile, (string, string)[] rows, out Label[] values, bool withNetwork = false)
         {
-            var section = new Panel
+            var section = new BufferedSectionPanel
             {
                 BorderStyle = BorderStyle.None,
                 BackColor = Color.Transparent,
@@ -933,7 +949,7 @@ namespace TaskbarTemp
             layoutChanged |= SetLabelText(_cpuClock, _clock.HasValue ? $"{_clock.Value / 1000f:0.00} GHz" : "—");
 
             layoutChanged |= SetLabelText(_gpuNameLabel, string.IsNullOrEmpty(_gpuName) ? "GPU" : _gpuName);
-            bool showGpuTemp = _gpuTemp.HasValue;
+            bool showGpuTemp = _gpuTemp.HasValue || (_hasGpuTempSample && _gpuTempMissingSamples < 3);
             if (_gpuTempRowVisible != showGpuTemp)
             {
                 _gpuTempCaption.Visible = showGpuTemp;
@@ -941,7 +957,7 @@ namespace TaskbarTemp
                 _gpuTempRowVisible = showGpuTemp;
                 layoutChanged = true;
             }
-            if (showGpuTemp) layoutChanged |= SetLabelText(_gpuTempLabel, $"{_gpuTemp.Value:0.0} °C");
+            if (showGpuTemp) layoutChanged |= SetLabelText(_gpuTempLabel, _gpuTemp.HasValue ? $"{_gpuTemp.Value:0.0} °C" : "—");
             layoutChanged |= SetLabelText(_gpuLoadLabel, _gpuLoad.HasValue ? $"{_gpuLoad.Value:0.0} %" : "—");
             layoutChanged |= SetLabelText(_vramLabel, _vramUsed.HasValue && _vramTotal.HasValue
                 ? $"共享 {_vramUsed.Value / 1024f:0.0} / {_vramTotal.Value / 1024f:0.0} GB"
@@ -965,7 +981,7 @@ namespace TaskbarTemp
             if (label == null || string.Equals(label.Text, text, StringComparison.Ordinal)) return false;
             Size preferredSize = label.GetPreferredSize(Size.Empty);
             label.Text = text;
-            return label.GetPreferredSize(Size.Empty) != preferredSize;
+            return label.GetPreferredSize(Size.Empty).Height != preferredSize.Height;
         }
 
         private void LayoutDetails()

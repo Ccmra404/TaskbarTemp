@@ -313,8 +313,8 @@ namespace TaskbarTemp
                     AutoScroll = true,
                     FlowDirection = FlowDirection.TopDown,
                     WrapContents = false,
-                    Padding = new Padding(10),
-                    BackColor = SystemColors.Control
+                    Padding = new Padding(14),
+                    BackColor = System.Windows.Forms.SystemInformation.HighContrast ? SystemColors.Window : Color.FromArgb(235, 240, 247)
                 };
                 _details = new Form
                 {
@@ -323,29 +323,27 @@ namespace TaskbarTemp
                     MinimumSize = new Size(320, 220),
                     Font = SystemFonts.MessageBoxFont,
                     AutoScaleMode = AutoScaleMode.Dpi,
-                    Opacity = 0.92,
+                    Opacity = System.Windows.Forms.SystemInformation.HighContrast ? 1.0 : 0.97,
                     FormBorderStyle = FormBorderStyle.SizableToolWindow,
                     StartPosition = FormStartPosition.Manual,
                     MaximizeBox = false,
                     MinimizeBox = false,
                     ShowInTaskbar = false
                 };
-                _cpuName = AddSection(new (string, string)[] { ("温度", ""), ("负载", ""), ("频率", "") }, out var cpuRows, true);
+                _cpuName = AddSection("CPU", new (string, string)[] { ("温度", ""), ("负载", ""), ("频率", "") }, out var cpuRows, true);
                 _cpuTemp = cpuRows[0]; _cpuLoad = cpuRows[1]; _cpuClock = cpuRows[2];
 
-                _gpuNameLabel = AddSection(_gpuTemp.HasValue
-                    ? new (string, string)[] { ("温度", ""), ("负载", ""), ("显存", "") }
-                    : new (string, string)[] { ("负载", ""), ("显存", "") }, out var gpuRows);
-                int gpuRow = 0;
-                _gpuTempLabel = _gpuTemp.HasValue ? gpuRows[gpuRow++] : null;
-                _gpuLoadLabel = gpuRows[gpuRow++]; _vramLabel = gpuRows[gpuRow];
+                _gpuNameLabel = AddSection("GPU", new (string, string)[] { ("温度", ""), ("负载", ""), ("显存", "") }, out var gpuRows);
+                _gpuTempLabel = gpuRows[0]; _gpuLoadLabel = gpuRows[1]; _vramLabel = gpuRows[2];
 
-                _npuName = AddSection(new (string, string)[] { ("负载", "") }, out var npuRows);
+                _npuName = AddSection("NPU", new (string, string)[] { ("负载", "") }, out var npuRows);
                 _npuUsageLabel = npuRows[0];
 
-                _memoryLabel = AddSection(new (string, string)[] { ("用量", "") }, out var memoryRows);
+                _memoryLabel = AddSection("RAM", new (string, string)[] { ("用量", "") }, out var memoryRows);
                 _memoryValue = memoryRows[0];
                 _details.Controls.Add(_detailsContent);
+                _detailsContent.Resize += (s, e) => LayoutDetails();
+                _details.DpiChanged += (s, e) => LayoutDetails();
                 _details.FormClosing += (s, e) => { if (!_exiting) { e.Cancel = true; _details.Hide(); } };
             }
 
@@ -523,8 +521,10 @@ namespace TaskbarTemp
         private static void DrawRoundedPanel(object sender, PaintEventArgs e)
         {
             var panel = (Panel)sender;
+            float scale = panel.DeviceDpi / 96f;
             var bounds = Rectangle.Inflate(panel.ClientRectangle, -1, -1);
-            int diameter = 20;
+            int diameter = Math.Min((int)(28 * scale), Math.Min(bounds.Width, bounds.Height));
+            if (diameter < 2) return;
             using var path = new GraphicsPath();
             path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
             path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
@@ -532,17 +532,33 @@ namespace TaskbarTemp
             path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
             path.CloseFigure();
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var fill = new SolidBrush(panel.BackColor);
-            using var border = new Pen(Color.FromArgb(55, SystemColors.ControlDark), 1f);
+            using var fill = new SolidBrush(System.Windows.Forms.SystemInformation.HighContrast ? SystemColors.Window : Color.FromArgb(250, 252, 255));
+            using var border = new Pen(System.Windows.Forms.SystemInformation.HighContrast ? SystemColors.WindowText : Color.FromArgb(220, 229, 240));
             e.Graphics.FillPath(fill, path);
             e.Graphics.DrawPath(border, path);
+
+            int tile = (int)(30 * scale), inset = (int)(10 * scale);
+            var tileBounds = new Rectangle(inset, inset, tile, tile);
+            using var tileBrush = new SolidBrush(System.Windows.Forms.SystemInformation.HighContrast ? SystemColors.Highlight : Color.FromArgb(226, 237, 252));
+            using var tilePath = new GraphicsPath();
+            int radius = Math.Max(2, (int)(10 * scale));
+            tilePath.AddArc(tileBounds.Left, tileBounds.Top, radius, radius, 180, 90);
+            tilePath.AddArc(tileBounds.Right - radius, tileBounds.Top, radius, radius, 270, 90);
+            tilePath.AddArc(tileBounds.Right - radius, tileBounds.Bottom - radius, radius, radius, 0, 90);
+            tilePath.AddArc(tileBounds.Left, tileBounds.Bottom - radius, radius, radius, 90, 90);
+            tilePath.CloseFigure();
+            e.Graphics.FillPath(tileBrush, tilePath);
+            TextRenderer.DrawText(e.Graphics, (string)panel.Tag, SystemFonts.MessageBoxFont, tileBounds,
+                System.Windows.Forms.SystemInformation.HighContrast ? SystemColors.HighlightText : Color.FromArgb(49, 105, 179),
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
-        private Label AddSection((string, string)[] rows, out Label[] values, bool withNetwork = false)
+        private Label AddSection(string tile, (string, string)[] rows, out Label[] values, bool withNetwork = false)
         {
             var section = new Panel
             {
                 BorderStyle = BorderStyle.None,
-                BackColor = SystemColors.Window,
+                BackColor = Color.Transparent,
+                Tag = tile,
                 Width = 340,
                 Margin = new Padding(0, 0, 0, 8)
             };
@@ -551,32 +567,26 @@ namespace TaskbarTemp
             var layout = new TableLayoutPanel
             {
                 AutoSize = false,
-                ColumnCount = withNetwork ? 4 : 2,
-                RowCount = rows.Length + 1,
+                ColumnCount = 2,
+                RowCount = rows.Length + (withNetwork ? 2 : 1),
                 Dock = DockStyle.Top,
-                Padding = new Padding(4)
+                Padding = new Padding(52, 10, 10, 10),
+                BackColor = Color.Transparent
             };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
-            layout.ColumnStyles.Add(withNetwork
-                ? new ColumnStyle(SizeType.Absolute, 110)
-                : new ColumnStyle(SizeType.Percent, 100));
-            if (withNetwork)
-            {
-                layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
-                layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            }
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
             var name = new Label
             {
                 AutoSize = true,
                 MaximumSize = new Size(320, 0),
-                Font = new Font(SystemFonts.MessageBoxFont.FontFamily, 10f, FontStyle.Bold),
+                Font = new Font(SystemFonts.MessageBoxFont, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleLeft,
                 UseMnemonic = false,
                 Margin = new Padding(3, 2, 3, 4)
             };
             layout.Controls.Add(name, 0, 0);
-            layout.SetColumnSpan(name, withNetwork ? 4 : 2);
+            layout.SetColumnSpan(name, 2);
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
             values = new Label[rows.Length];
@@ -597,7 +607,7 @@ namespace TaskbarTemp
                 {
                     Text = "—",
                     AutoSize = true,
-                    MaximumSize = new Size(withNetwork ? 110 : 285, 0),
+                    MaximumSize = new Size(285, 0),
                     Anchor = AnchorStyles.Left,
                     Margin = new Padding(3, 2, 3, 2)
                 };
@@ -606,22 +616,21 @@ namespace TaskbarTemp
 
             if (withNetwork)
             {
-                var networkLabel = new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 2, 3, 2) };
-                layout.Controls.Add(networkLabel, 2, 1);
-                layout.SetColumnSpan(networkLabel, 2);
-                layout.Controls.Add(new Label { Text = "↓", AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 2, 3, 2) }, 2, 2);
-                _networkDownSpeed = new Label { AutoSize = true, MaximumSize = new Size(285, 0), Anchor = AnchorStyles.Left, Margin = new Padding(3, 2, 3, 2) };
-                layout.Controls.Add(_networkDownSpeed, 3, 2);
-                layout.Controls.Add(new Label { Text = "↑", AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 2, 3, 2) }, 2, 3);
-                _networkUpSpeed = new Label { AutoSize = true, MaximumSize = new Size(285, 0), Anchor = AnchorStyles.Left, Margin = new Padding(3, 2, 3, 2) };
-                layout.Controls.Add(_networkUpSpeed, 3, 3);
+                int row = rows.Length + 1;
+                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                layout.Controls.Add(new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 2, 6, 2) }, 0, row);
+                var speeds = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = Padding.Empty, Dock = DockStyle.Fill };
+                _networkDownSpeed = new Label { AutoSize = true, Margin = new Padding(3, 2, 10, 2) };
+                _networkUpSpeed = new Label { AutoSize = true, Margin = new Padding(3, 2, 3, 2) };
+                speeds.Controls.Add(_networkDownSpeed);
+                speeds.Controls.Add(_networkUpSpeed);
+                layout.Controls.Add(speeds, 1, row);
             }
 
             section.Controls.Add(layout);
-            layout.Location = new Point(8, 6);
-            layout.Width = section.ClientSize.Width - 16;
+            layout.Width = section.ClientSize.Width;
             layout.Height = layout.GetPreferredSize(new Size(layout.Width, 0)).Height;
-            section.Height = layout.Height + 12;
+            section.Height = layout.Height;
             _detailsContent.Controls.Add(section);
             return name;
         }
@@ -645,11 +654,12 @@ namespace TaskbarTemp
                 ? $"{_memUsedGb.Value:0.0} / {_memTotalGb.Value:0.0} GB"
                 : "—");
 
-            SetLabelText(_networkDownSpeed, FormatNetworkSpeed(_networkDownloadBps));
-            SetLabelText(_networkUpSpeed, FormatNetworkSpeed(_networkUploadBps));
+            SetLabelText(_networkDownSpeed, "↓ " + FormatNetworkSpeed(_networkDownloadBps));
+            SetLabelText(_networkUpSpeed, "↑ " + FormatNetworkSpeed(_networkUploadBps));
 
             SetLabelText(_npuName, "NPU");
             SetLabelText(_npuUsageLabel, _npuUsage.HasValue ? $"{_npuUsage.Value:0.0} %" : "—");
+            LayoutDetails();
         }
 
         private static void SetLabelText(Label label, string text)
@@ -658,25 +668,36 @@ namespace TaskbarTemp
                 label.Text = text;
         }
 
-        private void FitDetailsToScreen(Rectangle area)
+        private void LayoutDetails()
         {
-            int width = Math.Min(430, Math.Max(280, area.Width - 24));
+            if (_detailsContent == null || _detailsContent.ClientSize.Width <= 0) return;
+            int scale(int value) => (int)Math.Round(value * _detailsContent.DeviceDpi / 96.0);
+            int width = Math.Max(scale(200), _detailsContent.ClientSize.Width - _detailsContent.Padding.Horizontal - scale(12));
             foreach (Panel section in _detailsContent.Controls)
             {
-                section.Width = width - 46;
+                section.Width = width;
                 var layout = (TableLayoutPanel)section.Controls[0];
-                layout.Width = section.ClientSize.Width - 16;
-                layout.GetControlFromPosition(0, 0).MaximumSize = new Size(layout.ClientSize.Width - layout.Padding.Horizontal, 0);
+                layout.Width = width;
+                layout.Padding = new Padding(scale(52), scale(7), scale(8), scale(7));
+                layout.ColumnStyles[0].Width = scale(50);
+                layout.GetControlFromPosition(0, 0).MaximumSize = new Size(Math.Max(scale(80), width - layout.Padding.Horizontal), 0);
                 for (int row = 1; row < layout.RowCount; row++)
-                    layout.GetControlFromPosition(1, row).MaximumSize = new Size(Math.Max(80, layout.ClientSize.Width - 112), 0);
+                    layout.GetControlFromPosition(1, row).MaximumSize = new Size(Math.Max(scale(80), width - layout.Padding.Horizontal - scale(50)), 0);
                 layout.PerformLayout();
-                layout.Height = layout.GetPreferredSize(new Size(layout.Width, 0)).Height;
-                section.Height = layout.Height + 12;
+                layout.Height = layout.GetPreferredSize(new Size(width, 0)).Height;
+                section.Height = layout.Height;
             }
-            _detailsContent.PerformLayout();
+        }
+
+        private void FitDetailsToScreen(Rectangle area)
+        {
+            int scale(int value) => (int)Math.Round(value * _details.DeviceDpi / 96.0);
+            int width = Math.Min(scale(360), Math.Max(scale(280), area.Width - scale(24)));
+            _details.ClientSize = new Size(width, _details.ClientSize.Height);
+            LayoutDetails();
             int contentHeight = _detailsContent.Padding.Vertical + _detailsContent.Controls
                 .Cast<Control>().Sum(control => control.Height + control.Margin.Vertical);
-            _details.ClientSize = new Size(width, Math.Min(Math.Max(250, contentHeight), Math.Max(180, area.Height - 24)));
+            _details.ClientSize = new Size(width, Math.Min(Math.Max(scale(250), contentHeight), Math.Max(scale(180), area.Height - scale(60))));
             _detailsScreenArea = area;
         }
 

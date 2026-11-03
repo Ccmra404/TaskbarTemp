@@ -559,7 +559,7 @@ namespace TaskbarTemp
                 else
                 {
                     ReplaceTrayIcon("--", IconRenderer.ColorFor(null), "nodata");
-                    SetTip("CPU 温度：读取不到（需管理员权限）");
+                    SetTip("CPU 温度：未读到，请检查驱动和管理员权限");
                 }
                 if (_details != null && !_details.IsDisposed && _details.Visible) UpdateDetails();
             }
@@ -1099,7 +1099,7 @@ namespace TaskbarTemp
         {
             bool layoutChanged = false;
             layoutChanged |= SetLabelText(_cpuName, string.IsNullOrEmpty(_hwName) ? "CPU" : _hwName);
-            layoutChanged |= SetLabelText(_cpuTemp, _temp.HasValue ? $"{_temp.Value:0.0} °C" : "未读到温度（请以管理员身份运行）");
+            layoutChanged |= SetLabelText(_cpuTemp, _temp.HasValue ? $"{_temp.Value:0.0} °C" : "未读到温度");
             layoutChanged |= SetLabelText(_cpuLoad, _load.HasValue ? $"{_load.Value:0} %" : "—");
             layoutChanged |= SetLabelText(_cpuClock, _clock.HasValue ? $"{_clock.Value / 1000f:0.00} GHz" : "—");
 

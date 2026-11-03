@@ -43,24 +43,32 @@ namespace TaskbarTemp
         private Label _cpuName, _cpuTemp, _cpuLoad, _cpuClock;
         private Label _gpuNameLabel, _gpuTempLabel, _gpuLoadLabel, _vramLabel;
         private Label _memoryLabel, _memoryValue;
-        private Label _networkSpeed, _npuName, _npuUsageLabel;
+        private Label _networkName, _networkSpeed, _npuName, _npuUsageLabel;
         private readonly HashSet<string> _physicalNetworkNames;
+        private readonly HashSet<string> _hardwareFailures = new(StringComparer.OrdinalIgnoreCase);
+
+        private const int RefreshIntervalMs = 2000;
+        private const int NpuSampleIntervalMs = 6000;
+        private const long MaxLogBytes = 1024 * 1024;
 
         private Icon _currentIcon;
         private string _lastKey = "";
         private string _lastTip = "";
-        private int _failCount;
         private bool _loggedFirstRead;
         private bool _loggedNetworkRead, _loggedNpuRead;
         private bool _loggedNpuProbe;
         private bool _exiting;
+        private bool _disposed;
+        private DateTime _nextNpuSampleUtc = DateTime.MinValue;
 
         private float? _temp;
         private float? _load;
         private float? _clock;
         private string _hwName = "";
         private readonly int _iconSize;
-        private readonly System.Collections.Generic.List<float> _tHistory = new();
+        private readonly float[] _tempSamples = new float[5];
+        private int _tempSampleCount;
+        private int _tempSampleIndex;
 
         private float? _gpuTemp;
         private float? _gpuLoad;
@@ -106,16 +114,17 @@ namespace TaskbarTemp
             _menu.Items.Add("退出", null, (s, e) => ExitApp());
 
             _iconSize = IconRenderer.TrayIconSize;
+            _currentIcon = IconRenderer.Render("--", IconRenderer.ColorFor(null), _iconSize, _style);
             _tray = new NotifyIcon
             {
                 Visible = true,
                 ContextMenuStrip = _menu,
                 Text = "TaskbarTemp 启动中…",
-                Icon = IconRenderer.Render("--", IconRenderer.ColorFor(null), _iconSize, _style)
+                Icon = _currentIcon
             };
             _tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowDetails(); };
 
-            _timer = new System.Windows.Forms.Timer { Interval = 2000 };
+            _timer = new System.Windows.Forms.Timer { Interval = RefreshIntervalMs };
             _timer.Tick += (s, e) => Refresh();
             _timer.Start();
 
@@ -137,21 +146,30 @@ namespace TaskbarTemp
 
                 foreach (var hw in _computer.Hardware)
                 {
-                    try { hw.Update(); }
-                    catch (Exception ex) { Log($"hardware update failed: {hw.Name}: {ex.Message}"); continue; }
+                    try
+                    {
+                        hw.Update();
+                        if (_hardwareFailures.Remove(hw.Name))
+                            Log($"hardware update recovered: {hw.Name}");
+                    }
+                    catch (Exception ex)
+                    {
+                        if (_hardwareFailures.Add(hw.Name))
+                            Log($"hardware update failed: {hw.Name}: {ex.Message}");
+                        continue;
+                    }
 
                     if (hw.HardwareType == HardwareType.Cpu)
                     {
                         hwname = hw.Name;
 
-                        var temps = hw.Sensors
-                            .Where(s => s.SensorType == SensorType.Temperature && s.Value.HasValue)
-                            .ToList();
-
-                        var best = temps.FirstOrDefault(s => s.Name.Equals("CPU Package", StringComparison.OrdinalIgnoreCase))
-                                ?? temps.FirstOrDefault(s => s.Name.Equals("Core Max", StringComparison.OrdinalIgnoreCase))
-                                ?? temps.FirstOrDefault(s => s.Name.IndexOf("Package", StringComparison.OrdinalIgnoreCase) >= 0)
-                                ?? temps.FirstOrDefault();
+                        var best = hw.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Temperature && s.Value.HasValue &&
+                                    s.Name.Equals("CPU Package", StringComparison.OrdinalIgnoreCase))
+                                ?? hw.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Temperature && s.Value.HasValue &&
+                                    s.Name.Equals("Core Max", StringComparison.OrdinalIgnoreCase))
+                                ?? hw.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Temperature && s.Value.HasValue &&
+                                    s.Name.IndexOf("Package", StringComparison.OrdinalIgnoreCase) >= 0)
+                                ?? hw.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Temperature && s.Value.HasValue);
 
                         if (best != null) t = best.Value;
 
@@ -224,16 +242,20 @@ namespace TaskbarTemp
                 _memTotalGb = memTotalGb;
                 _networkDownloadBps = netDownload;
                 _networkUploadBps = netUpload;
-                _npuUsage = ReadNpuUsage();
-                if (!_loggedNpuRead && _npuUsage.HasValue)
+                var nowUtc = DateTime.UtcNow;
+                if (nowUtc >= _nextNpuSampleUtc)
                 {
-                    _loggedNpuRead = true;
-                    Log($"NPU counter OK: {_npuUsage.Value:0.0}%");
+                    _npuUsage = ReadNpuUsage();
+                    _nextNpuSampleUtc = nowUtc.AddMilliseconds(NpuSampleIntervalMs);
+                    if (!_loggedNpuRead && _npuUsage.HasValue)
+                    {
+                        _loggedNpuRead = true;
+                        Log($"NPU counter OK: {_npuUsage.Value:0.0}%");
+                    }
                 }
 
                 if (t.HasValue)
                 {
-                    _failCount = 0;
                     if (!_loggedFirstRead)
                     {
                         _loggedFirstRead = true;
@@ -243,24 +265,14 @@ namespace TaskbarTemp
 
                     // 中值滤波：核心从 C-state 醒来瞬间传感器会报虚高尖峰（单采样毛刺），
                     // 取最近 5 次读数的中位数显示，毛刺被滤掉，真实变化不受影响。
-                    _tHistory.Add(t.Value);
-                    if (_tHistory.Count > 5) _tHistory.RemoveAt(0);
-                    var sorted = _tHistory.OrderBy(v => v).ToList();
-                    float disp = sorted[sorted.Count / 2];
-                    if (_tHistory.Count == 5 && Math.Abs(disp - t.Value) > 12f)
+                    float disp = FilterTemperature(t.Value);
+                    if (_tempSampleCount == _tempSamples.Length && Math.Abs(disp - t.Value) > 12f)
                         Log($"spike filtered: raw={t.Value:0.0} -> shown={disp:0.0}");
 
                     string text = Math.Round(disp).ToString("0");
                     var accent = IconRenderer.ColorFor(disp);
                     string key = text + "|" + accent.ToArgb() + "|" + _iconSize;
-                    if (key != _lastKey)
-                    {
-                        var newIcon = IconRenderer.Render(text, accent, _iconSize, _style);
-                        _tray.Icon = newIcon;
-                        _currentIcon?.Dispose();
-                        _currentIcon = newIcon;
-                        _lastKey = key;
-                    }
+                    ReplaceTrayIcon(text, accent, key);
 
                     string tip = $"CPU {disp:0}°C{(load.HasValue ? $" {load.Value:0}%" : "")}";
                     if (gpuTemp.HasValue) tip += $" GPU {gpuTemp.Value:0}°C";
@@ -271,12 +283,7 @@ namespace TaskbarTemp
                 }
                 else
                 {
-                    _failCount++;
-                    if (_lastKey != "nodata")
-                    {
-                        _tray.Icon = IconRenderer.Render("--", IconRenderer.ColorFor(null), _iconSize, _style);
-                        _lastKey = "nodata";
-                    }
+                    ReplaceTrayIcon("--", IconRenderer.ColorFor(null), "nodata");
                     SetTip("CPU 温度：读取不到（需管理员权限）");
                 }
                 if (_details != null && !_details.IsDisposed) UpdateDetails();
@@ -306,33 +313,37 @@ namespace TaskbarTemp
                     AutoScroll = true,
                     FlowDirection = FlowDirection.TopDown,
                     WrapContents = false,
-                    Padding = new Padding(6),
+                    Padding = new Padding(10),
                     BackColor = SystemColors.Control
                 };
                 _details = new Form
                 {
                     Text = "TaskbarTemp 详情",
-                    ClientSize = new Size(380, 260),
-                    MinimumSize = new Size(300, 180),
+                    ClientSize = new Size(410, 340),
+                    MinimumSize = new Size(320, 220),
                     Font = new Font("Segoe UI", 10f),
                     AutoScaleMode = AutoScaleMode.Dpi,
-                    Opacity = 0.92,
+                    Opacity = 0.97,
                     FormBorderStyle = FormBorderStyle.SizableToolWindow,
                     StartPosition = FormStartPosition.Manual,
                     MaximizeBox = false,
                     MinimizeBox = false,
                     ShowInTaskbar = false
                 };
-                _cpuName = AddSection(new (string, string)[] { ("温度", ""), ("负载", ""), ("频率", "") }, out var cpuRows, true);
+                _cpuName = AddSection(new (string, string)[] { ("温度", ""), ("负载", ""), ("频率", "") }, out var cpuRows);
                 _cpuTemp = cpuRows[0]; _cpuLoad = cpuRows[1]; _cpuClock = cpuRows[2];
-                _gpuNameLabel = AddSection(_gpuTemp.HasValue ? new (string, string)[] { ("温度", ""), ("负载", ""), ("显存", "") } : new (string, string)[] { ("负载", ""), ("显存", "") }, out var gpuRows);
-                int gpuRow = 0;
-                _gpuTempLabel = _gpuTemp.HasValue ? gpuRows[gpuRow++] : null;
-                _gpuLoadLabel = gpuRows[gpuRow++]; _vramLabel = gpuRows[gpuRow];
-                _npuName = AddSection(new (string, string)[] { ("负载", "") }, out var npuRows);
-                _npuUsageLabel = npuRows[0];
+
+                _gpuNameLabel = AddSection(new (string, string)[] { ("温度", ""), ("负载", ""), ("显存", "") }, out var gpuRows);
+                _gpuTempLabel = gpuRows[0]; _gpuLoadLabel = gpuRows[1]; _vramLabel = gpuRows[2];
+
                 _memoryLabel = AddSection(new (string, string)[] { ("用量", "") }, out var memoryRows);
                 _memoryValue = memoryRows[0];
+
+                _networkName = AddSection(new (string, string)[] { ("速率", "") }, out var networkRows);
+                _networkSpeed = networkRows[0];
+
+                _npuName = AddSection(new (string, string)[] { ("负载", "") }, out var npuRows);
+                _npuUsageLabel = npuRows[0];
                 _details.Controls.Add(_detailsContent);
                 _details.FormClosing += (s, e) => { if (!_exiting) { e.Cancel = true; _details.Hide(); } };
             }
@@ -375,49 +386,125 @@ namespace TaskbarTemp
         {
             try
             {
-                var neural = new List<(string Luid, string Engine, float Usage)>();
+                var neuralByAdapter = new Dictionary<string, Dictionary<string, float>>(StringComparer.OrdinalIgnoreCase);
                 var has3D = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                using var searcher = new ManagementObjectSearcher("SELECT Name, UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%engtype_Neural%' OR Name LIKE '%engtype_3D%'");
+
+                using var searcher = new ManagementObjectSearcher(
+                    "SELECT Name, UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%engtype_Neural%' OR Name LIKE '%engtype_3D%'");
                 using var instances = searcher.Get();
+
                 foreach (ManagementObject instance in instances)
                 using (instance)
                 {
                     string name = instance["Name"] as string ?? "";
                     int luidStart = name.IndexOf("luid_", StringComparison.OrdinalIgnoreCase);
                     if (luidStart < 0) continue;
+
                     int physStart = name.IndexOf("_phys_", luidStart, StringComparison.OrdinalIgnoreCase);
                     if (physStart < 0) continue;
+
                     string luid = name.Substring(luidStart + 5, physStart - luidStart - 5);
-                    if (name.Contains("_engtype_3D", StringComparison.OrdinalIgnoreCase)) has3D.Add(luid);
-                    if (!name.Contains("_engtype_Neural", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (name.Contains("_engtype_3D", StringComparison.OrdinalIgnoreCase))
+                    {
+                        has3D.Add(luid);
+                        continue;
+                    }
+
+                    if (!name.Contains("_engtype_Neural", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
                     int engineEnd = name.IndexOf("_engtype_", physStart, StringComparison.OrdinalIgnoreCase);
                     if (engineEnd < 0) continue;
+
                     string engine = name.Substring(physStart, engineEnd - physStart);
-                    float usage = Convert.ToSingle(instance["UtilizationPercentage"]);
-                    neural.Add((luid, engine, usage));
+                    float usage = instance["UtilizationPercentage"] == null
+                        ? 0f
+                        : Convert.ToSingle(instance["UtilizationPercentage"]);
+
+                    if (!neuralByAdapter.TryGetValue(luid, out var engines))
+                    {
+                        engines = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+                        neuralByAdapter[luid] = engines;
+                    }
+
+                    engines.TryGetValue(engine, out float current);
+                    engines[engine] = current + usage;
                 }
 
-                string[] npuAdapters = neural.Select(item => item.Luid).Distinct(StringComparer.OrdinalIgnoreCase)
-                    .Where(luid => !has3D.Contains(luid)).ToArray();
-                // shortcut: treats the Neural-only adapter as the NPU; add PnP-to-LUID mapping if multiple adapters match.
-                if (npuAdapters.Length != 1)
+                string candidate = null;
+                int candidateCount = 0;
+                foreach (var adapter in neuralByAdapter)
+                {
+                    if (has3D.Contains(adapter.Key)) continue;
+                    candidate = adapter.Key;
+                    candidateCount++;
+                }
+
+                if (candidateCount != 1)
                 {
                     if (!_loggedNpuProbe)
                     {
                         _loggedNpuProbe = true;
-                        Log($"NPU counter unavailable: Neural rows={neural.Count}, candidates={npuAdapters.Length}");
+                        Log($"NPU counter unavailable: Neural adapters={neuralByAdapter.Count}, candidates={candidateCount}");
                     }
                     return null;
                 }
+
                 _loggedNpuProbe = true;
-                return Math.Min(100f, Math.Max(0f, neural.Where(item => item.Luid.Equals(npuAdapters[0], StringComparison.OrdinalIgnoreCase))
-                    .GroupBy(item => item.Engine).Select(group => group.Sum(item => item.Usage)).DefaultIfEmpty().Max()));
+                float maxUsage = 0f;
+                foreach (float usage in neuralByAdapter[candidate].Values)
+                    if (usage > maxUsage) maxUsage = usage;
+
+                return Math.Clamp(maxUsage, 0f, 100f);
             }
             catch (Exception ex)
             {
-                if (!_loggedNpuProbe) { _loggedNpuProbe = true; Log("NPU counter failed: " + ex.Message); }
+                if (!_loggedNpuProbe)
+                {
+                    _loggedNpuProbe = true;
+                    Log("NPU counter failed: " + ex.Message);
+                }
                 return null;
             }
+        }
+
+        private float FilterTemperature(float value)
+        {
+            _tempSamples[_tempSampleIndex] = value;
+            _tempSampleIndex = (_tempSampleIndex + 1) % _tempSamples.Length;
+            if (_tempSampleCount < _tempSamples.Length)
+                _tempSampleCount++;
+
+            Span<float> sorted = stackalloc float[5];
+            for (int i = 0; i < _tempSampleCount; i++)
+                sorted[i] = _tempSamples[i];
+
+            for (int i = 1; i < _tempSampleCount; i++)
+            {
+                float current = sorted[i];
+                int j = i - 1;
+                while (j >= 0 && sorted[j] > current)
+                {
+                    sorted[j + 1] = sorted[j];
+                    j--;
+                }
+                sorted[j + 1] = current;
+            }
+
+            return sorted[_tempSampleCount / 2];
+        }
+
+        private void ReplaceTrayIcon(string text, Color accent, string key)
+        {
+            if (key == _lastKey) return;
+
+            var nextIcon = IconRenderer.Render(text, accent, _iconSize, _style);
+            _tray.Icon = nextIcon;
+
+            var previousIcon = _currentIcon;
+            _currentIcon = nextIcon;
+            _lastKey = key;
+            previousIcon?.Dispose();
         }
 
         private static string FormatNetworkSpeed(float? bytesPerSecond)
@@ -432,7 +519,7 @@ namespace TaskbarTemp
         {
             var panel = (Panel)sender;
             var bounds = Rectangle.Inflate(panel.ClientRectangle, -1, -1);
-            int diameter = 44;
+            int diameter = 20;
             using var path = new GraphicsPath();
             path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
             path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
@@ -441,61 +528,70 @@ namespace TaskbarTemp
             path.CloseFigure();
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             using var fill = new SolidBrush(panel.BackColor);
-            using var border = new Pen(Color.FromArgb(100, SystemColors.ControlDark), 1f);
+            using var border = new Pen(Color.FromArgb(55, SystemColors.ControlDark), 1f);
             e.Graphics.FillPath(fill, path);
             e.Graphics.DrawPath(border, path);
         }
-        private Label AddSection((string, string)[] rows, out Label[] values, bool withNetwork = false)
+        private Label AddSection((string, string)[] rows, out Label[] values)
         {
             var section = new Panel
             {
                 BorderStyle = BorderStyle.None,
-                BackColor = SystemColors.ControlLightLight,
+                BackColor = SystemColors.Window,
                 Width = 340,
-                Margin = new Padding(0, 0, 0, 3)
+                Margin = new Padding(0, 0, 0, 8)
             };
             section.Paint += DrawRoundedPanel;
+
             var layout = new TableLayoutPanel
             {
                 AutoSize = false,
                 ColumnCount = 2,
-                RowCount = rows.Length + (withNetwork ? 2 : 1),
+                RowCount = rows.Length + 1,
                 Dock = DockStyle.Top,
-                Padding = new Padding(2)
+                Padding = new Padding(4)
             };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
             var name = new Label
             {
                 AutoSize = true,
                 MaximumSize = new Size(320, 0),
                 Font = new Font("Segoe UI", 10f, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleLeft,
-                UseMnemonic = false
+                UseMnemonic = false,
+                Margin = new Padding(3, 2, 3, 4)
             };
             layout.Controls.Add(name, 0, 0);
             layout.SetColumnSpan(name, 2);
-            if (withNetwork)
-            {
-                _networkSpeed = new Label { AutoSize = true, Anchor = AnchorStyles.Left, MaximumSize = new Size(285, 0), Margin = new Padding(3, 1, 3, 1) };
-            }
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
             values = new Label[rows.Length];
             for (int i = 0; i < rows.Length; i++)
             {
                 int row = i + 1;
                 layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-                layout.Controls.Add(new Label { Text = rows[i].Item1, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 1, 6, 1) }, 0, row);
-                values[i] = new Label { Text = "—", AutoSize = true, MaximumSize = new Size(285, 0), Anchor = AnchorStyles.Left, Margin = new Padding(3, 1, 3, 1) };
+                layout.Controls.Add(new Label
+                {
+                    Text = rows[i].Item1,
+                    AutoSize = true,
+                    Anchor = AnchorStyles.Left,
+                    ForeColor = SystemColors.GrayText,
+                    Margin = new Padding(3, 2, 6, 2)
+                }, 0, row);
+
+                values[i] = new Label
+                {
+                    Text = "—",
+                    AutoSize = true,
+                    MaximumSize = new Size(285, 0),
+                    Anchor = AnchorStyles.Left,
+                    Margin = new Padding(3, 2, 3, 2)
+                };
                 layout.Controls.Add(values[i], 1, row);
             }
-            if (withNetwork)
-            {
-                int networkRow = rows.Length + 1;
-                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-                layout.Controls.Add(new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 1, 6, 1) }, 0, networkRow);
-                layout.Controls.Add(_networkSpeed, 1, networkRow);
-            }
+
             section.Controls.Add(layout);
             layout.Location = new Point(8, 6);
             layout.Width = section.ClientSize.Width - 16;
@@ -507,20 +603,34 @@ namespace TaskbarTemp
 
         private void UpdateDetails()
         {
-            _cpuName.Text = string.IsNullOrEmpty(_hwName) ? "CPU" : _hwName;
-            _cpuTemp.Text = _temp.HasValue ? $"{_temp.Value:0.0} °C" : "未读到温度（请以管理员身份运行）";
-            _cpuLoad.Text = _load.HasValue ? $"{_load.Value:0} %" : "—";
-            _cpuClock.Text = _clock.HasValue ? $"{_clock.Value / 1000f:0.00} GHz" : "—";
-            _gpuNameLabel.Text = string.IsNullOrEmpty(_gpuName) ? "GPU" : _gpuName;
-            if (_gpuTempLabel != null) _gpuTempLabel.Text = $"{_gpuTemp.Value:0.0} °C";
-            _gpuLoadLabel.Text = _gpuLoad.HasValue ? $"{_gpuLoad.Value:0.0} %" : "—";
-            _vramLabel.Text = _vramUsed.HasValue && _vramTotal.HasValue ? $"共享 {_vramUsed.Value / 1024f:0.0} / {_vramTotal.Value / 1024f:0.0} GB" : "—";
-            _memoryLabel.Text = "物理内存";
-            _memoryValue.Text = _memUsedGb.HasValue && _memTotalGb.HasValue ? $"{_memUsedGb.Value:0.0} / {_memTotalGb.Value:0.0} GB" : "—";
-            _networkSpeed.Text = $"↓ {FormatNetworkSpeed(_networkDownloadBps)}   ↑ {FormatNetworkSpeed(_networkUploadBps)}";
-            _npuName.Text = "Intel NPU";
-            _npuUsageLabel.Text = _npuUsage.HasValue ? $"{_npuUsage.Value:0.0} %" : "—";
-            _detailsContent.PerformLayout();
+            SetLabelText(_cpuName, string.IsNullOrEmpty(_hwName) ? "CPU" : _hwName);
+            SetLabelText(_cpuTemp, _temp.HasValue ? $"{_temp.Value:0.0} °C" : "未读到温度（请以管理员身份运行）");
+            SetLabelText(_cpuLoad, _load.HasValue ? $"{_load.Value:0} %" : "—");
+            SetLabelText(_cpuClock, _clock.HasValue ? $"{_clock.Value / 1000f:0.00} GHz" : "—");
+
+            SetLabelText(_gpuNameLabel, string.IsNullOrEmpty(_gpuName) ? "GPU" : _gpuName);
+            SetLabelText(_gpuTempLabel, _gpuTemp.HasValue ? $"{_gpuTemp.Value:0.0} °C" : "—");
+            SetLabelText(_gpuLoadLabel, _gpuLoad.HasValue ? $"{_gpuLoad.Value:0.0} %" : "—");
+            SetLabelText(_vramLabel, _vramUsed.HasValue && _vramTotal.HasValue
+                ? $"共享 {_vramUsed.Value / 1024f:0.0} / {_vramTotal.Value / 1024f:0.0} GB"
+                : "—");
+
+            SetLabelText(_memoryLabel, "物理内存");
+            SetLabelText(_memoryValue, _memUsedGb.HasValue && _memTotalGb.HasValue
+                ? $"{_memUsedGb.Value:0.0} / {_memTotalGb.Value:0.0} GB"
+                : "—");
+
+            SetLabelText(_networkName, "网络");
+            SetLabelText(_networkSpeed, $"↓ {FormatNetworkSpeed(_networkDownloadBps)}   ↑ {FormatNetworkSpeed(_networkUploadBps)}");
+
+            SetLabelText(_npuName, "NPU");
+            SetLabelText(_npuUsageLabel, _npuUsage.HasValue ? $"{_npuUsage.Value:0.0} %" : "—");
+        }
+
+        private static void SetLabelText(Label label, string text)
+        {
+            if (label != null && !string.Equals(label.Text, text, StringComparison.Ordinal))
+                label.Text = text;
         }
 
         private void FitDetailsToScreen(Rectangle area)
@@ -572,7 +682,7 @@ namespace TaskbarTemp
                 // 用 PowerShell 创建任务并立即修电源条件（电池供电也启动/不停/无时限），
                 // 避免计划任务默认 StopIfGoingOnBatteries 拔电源杀进程的坑。
                 string script =
-                    "$a = New-ScheduledTaskAction -Execute '\"' + '\"' + $env:TT_EXE + '\"' + '\"';" +
+                    "$a = New-ScheduledTaskAction -Execute $env:TT_EXE;" +
                     "$t = New-ScheduledTaskTrigger -AtLogOn;" +
                     "$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest;" +
                     "$s = New-ScheduledTaskSettingsSet -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries " +
@@ -618,22 +728,47 @@ namespace TaskbarTemp
         {
             _exiting = true;
             Log("exit");
-            _timer.Stop();
-            try { _computer.Close(); } catch { }
-            _tray.Visible = false;
-            _tray.Dispose();
+            Dispose();
             ExitThread();
         }
 
         private void Log(string m)
         {
-            try { File.AppendAllText(_logPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + m + Environment.NewLine); }
+            try
+            {
+                if (File.Exists(_logPath) && new FileInfo(_logPath).Length > MaxLogBytes)
+                    File.Move(_logPath, _logPath + ".old", true);
+
+                File.AppendAllText(_logPath,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + m + Environment.NewLine);
+            }
             catch { }
         }
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { _timer?.Dispose(); _tray?.Dispose(); _details?.Dispose(); }
+            if (disposing && !_disposed)
+            {
+                _disposed = true;
+                _timer?.Stop();
+
+                try { _computer?.Close(); } catch { }
+
+                if (_tray != null)
+                {
+                    _tray.Visible = false;
+                    _tray.Icon = null;
+                }
+
+                _currentIcon?.Dispose();
+                _currentIcon = null;
+
+                _details?.Dispose();
+                _menu?.Dispose();
+                _tray?.Dispose();
+                _timer?.Dispose();
+            }
+
             base.Dispose(disposing);
         }
     }

@@ -286,7 +286,7 @@ namespace TaskbarTemp
                     ReplaceTrayIcon("--", IconRenderer.ColorFor(null), "nodata");
                     SetTip("CPU 温度：读取不到（需管理员权限）");
                 }
-                if (_details != null && !_details.IsDisposed) UpdateDetails();
+                if (_details != null && !_details.IsDisposed && _details.Visible) UpdateDetails();
             }
             catch (Exception ex)
             {
@@ -309,7 +309,7 @@ namespace TaskbarTemp
                 _detailsContent = new FlowLayoutPanel
                 {
                     Dock = DockStyle.Fill,
-                    Font = new Font("Segoe UI", 10f),
+                    Font = SystemFonts.MessageBoxFont,
                     AutoScroll = true,
                     FlowDirection = FlowDirection.TopDown,
                     WrapContents = false,
@@ -321,7 +321,7 @@ namespace TaskbarTemp
                     Text = "TaskbarTemp 详情",
                     ClientSize = new Size(410, 340),
                     MinimumSize = new Size(320, 220),
-                    Font = new Font("Segoe UI", 10f),
+                    Font = SystemFonts.MessageBoxFont,
                     AutoScaleMode = AutoScaleMode.Dpi,
                     Opacity = 0.97,
                     FormBorderStyle = FormBorderStyle.SizableToolWindow,

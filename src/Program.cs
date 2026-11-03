@@ -830,7 +830,7 @@ namespace TaskbarTemp
         {
             if (_detailsContent == null || _detailsContent.ClientSize.Width <= 0) return;
             int scale(int value) => (int)Math.Round(value * _detailsContent.DeviceDpi / 96.0);
-            int width = Math.Max(1, _detailsContent.ClientSize.Width - _detailsContent.Padding.Horizontal - scale(44));
+            int width = Math.Max(1, _detailsContent.ClientSize.Width - _detailsContent.Padding.Horizontal - System.Windows.Forms.SystemInformation.VerticalScrollBarWidth);
             foreach (Panel section in _detailsContent.Controls)
             {
                 section.Width = width;

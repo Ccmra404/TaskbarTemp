@@ -618,6 +618,8 @@ namespace TaskbarTemp
         {
             if (!bytesPerSecond.HasValue) return "—";
             float speed = Math.Max(0, bytesPerSecond.Value);
+            if (speed >= 1_073_741_824) return $"{speed / 1_073_741_824:0.00} GB/s";
+            if (speed >= 104_857_600) return $"{speed / 1_048_576:0} MB/s";
             if (speed >= 1_048_576) return $"{speed / 1_048_576:0.0} MB/s";
             if (speed >= 1_024) return $"{speed / 1_024:0} KB/s";
             return $"{speed:0} B/s";
@@ -768,7 +770,7 @@ namespace TaskbarTemp
                 layout.Controls.Add(new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, Tag = "caption", Margin = new Padding(3, 2, 6, 2) }, 0, row);
                 var speeds = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty, Dock = DockStyle.Fill };
                 _networkDownSpeed = new Label { AutoSize = true, Margin = Padding.Empty };
-                _networkUpSpeed = new Label { AutoSize = true, Margin = Padding.Empty };
+                _networkUpSpeed = new Label { AutoSize = true, Margin = new Padding(4, 0, 0, 0) };
                 speeds.Controls.Add(_networkDownSpeed);
                 speeds.Controls.Add(_networkUpSpeed);
                 layout.Controls.Add(speeds, 1, row);
@@ -810,8 +812,8 @@ namespace TaskbarTemp
                 ? $"{_memUsedGb.Value:0.0} / {_memTotalGb.Value:0.0} GB"
                 : "—");
 
-            layoutChanged |= SetLabelText(_networkDownSpeed, "↓ " + FormatNetworkSpeed(_networkDownloadBps));
-            layoutChanged |= SetLabelText(_networkUpSpeed, "↑ " + FormatNetworkSpeed(_networkUploadBps));
+            layoutChanged |= SetLabelText(_networkDownSpeed, "↓" + FormatNetworkSpeed(_networkDownloadBps));
+            layoutChanged |= SetLabelText(_networkUpSpeed, "↑" + FormatNetworkSpeed(_networkUploadBps));
 
             layoutChanged |= SetLabelText(_npuName, "NPU");
             layoutChanged |= SetLabelText(_npuUsageLabel, _npuUsage.HasValue ? $"{_npuUsage.Value:0.0} %" : "—");

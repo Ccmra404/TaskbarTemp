@@ -327,7 +327,7 @@ namespace TaskbarTemp
                 {
                     Text = "TaskbarTemp 详情",
                     ClientSize = new Size(410, 340),
-                    MinimumSize = new Size(320, 220),
+                    MinimumSize = new Size(280, 220),
                     Font = SystemFonts.MessageBoxFont,
                     AutoScaleMode = AutoScaleMode.Dpi,
                     Opacity = 1.0,
@@ -854,8 +854,8 @@ namespace TaskbarTemp
             int frameHeight = Math.Max(0, _details.Height - _details.ClientSize.Height);
             int maxWidth = Math.Max(1, area.Width - scale(24) - frameWidth);
             int maxHeight = Math.Max(1, area.Height - scale(48) - frameHeight);
-            _details.MinimumSize = new Size(Math.Min(scale(320) + frameWidth, maxWidth + frameWidth), Math.Min(scale(180) + frameHeight, maxHeight + frameHeight));
-            int width = Math.Min(scale(360), maxWidth);
+            _details.MinimumSize = new Size(Math.Min(scale(280) + frameWidth, maxWidth + frameWidth), Math.Min(scale(180) + frameHeight, maxHeight + frameHeight));
+            int width = Math.Min(scale(300), maxWidth);
             _details.ClientSize = new Size(width, _details.ClientSize.Height);
             LayoutDetails();
             int contentHeight = _detailsContent.Padding.Vertical + _detailsContent.Controls

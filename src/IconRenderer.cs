@@ -85,8 +85,6 @@ namespace TaskbarTemp
 
         // Windows 11 原生风格：两行排版（小 CPU 标 + 大数字）、无底板
         // 深色任务栏 → 白色字；浅色任务栏 → 深灰字（随系统主题自动）
-        private static readonly Color _monoGlyph = DetectGlyphColor();
-
         private static Color DetectGlyphColor()
         {
             try
@@ -102,7 +100,7 @@ namespace TaskbarTemp
 
         private static void DrawMono(Graphics g, string text, Color accent, int size)
         {
-            Color glyph    = _monoGlyph;
+            Color glyph = DetectGlyphColor();
 
             float numFs = text.Length >= 3 ? size * (size <= 16 ? 0.54f : 0.60f) : size * (size <= 16 ? 0.76f : 0.80f);
 
@@ -213,7 +211,7 @@ namespace TaskbarTemp
                     }
                 }
                 catch { }
-                return IconStyle.Number;
+                return IconStyle.Mono;
             }
         }
 

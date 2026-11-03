@@ -47,6 +47,82 @@ namespace TaskbarTemp
                 => SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
         }
 
+        private sealed class BufferedCategoryIcon : Control
+        {
+            private readonly string _category;
+            private Bitmap _image;
+            private Color _tileColor, _glyphColor;
+
+            public BufferedCategoryIcon(string category, Color tileColor, Color glyphColor)
+            {
+                _category = category;
+                _tileColor = Color.FromArgb(tileColor.ToArgb());
+                _glyphColor = Color.FromArgb(glyphColor.ToArgb());
+                TabStop = false;
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                         ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+                BackColor = Color.Transparent;
+            }
+
+            public void SetTheme(Color tileColor, Color glyphColor)
+            {
+                tileColor = Color.FromArgb(tileColor.ToArgb());
+                glyphColor = Color.FromArgb(glyphColor.ToArgb());
+                if (_tileColor.ToArgb() == tileColor.ToArgb() && _glyphColor.ToArgb() == glyphColor.ToArgb()) return;
+                _tileColor = tileColor;
+                _glyphColor = glyphColor;
+                ResetImage();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                if (_image == null)
+                {
+                    _image = new Bitmap(Math.Max(1, Width), Math.Max(1, Height), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+                    using var graphics = Graphics.FromImage(_image);
+                    graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                    var bounds = new Rectangle(Point.Empty, _image.Size);
+                    using var brush = new SolidBrush(_tileColor);
+                    using var path = new GraphicsPath();
+                    int radius = Math.Max(2, (int)Math.Round(10 * DeviceDpi / 96f));
+                    path.AddArc(bounds.Left, bounds.Top, radius, radius, 180, 90);
+                    path.AddArc(bounds.Right - radius, bounds.Top, radius, radius, 270, 90);
+                    path.AddArc(bounds.Right - radius, bounds.Bottom - radius, radius, radius, 0, 90);
+                    path.AddArc(bounds.Left, bounds.Bottom - radius, radius, radius, 90, 90);
+                    path.CloseFigure();
+                    graphics.FillPath(brush, path);
+                    DrawCategoryIcon(graphics, _category, bounds, _glyphColor, DeviceDpi / 96f);
+                }
+                e.Graphics.DrawImageUnscaled(_image, Point.Empty);
+            }
+
+            protected override void OnSizeChanged(EventArgs e)
+            {
+                base.OnSizeChanged(e);
+                ResetImage();
+            }
+
+            protected override void OnDpiChangedAfterParent(EventArgs e)
+            {
+                base.OnDpiChangedAfterParent(e);
+                ResetImage();
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) _image?.Dispose();
+                base.Dispose(disposing);
+            }
+
+            private void ResetImage()
+            {
+                _image?.Dispose();
+                _image = null;
+                Invalidate();
+            }
+        }
+
         private readonly NotifyIcon _tray;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly System.Windows.Forms.Timer _npuTimer;
@@ -67,6 +143,7 @@ namespace TaskbarTemp
         private Label _networkDownSpeed, _networkUpSpeed, _npuName, _npuUsageLabel;
         private bool _systemBackdropApplied;
         private bool _detailsDarkMode, _detailsHighContrast;
+        private int _detailsCardFillArgb, _detailsCardBorderArgb;
         private bool? _gpuTempRowVisible;
         private int _gpuTempMissingSamples;
         private bool _hasGpuTempSample;
@@ -527,9 +604,15 @@ namespace TaskbarTemp
 
         private void ApplyWindowStyle()
         {
+            bool previousBackdrop = _systemBackdropApplied;
             bool highContrast = _detailsHighContrast = System.Windows.Forms.SystemInformation.HighContrast;
             bool dark = IsDarkMode();
             _detailsDarkMode = dark;
+            int cardFillArgb = CardFillColor(highContrast, dark).ToArgb();
+            int cardBorderArgb = CardBorderColor(highContrast, dark).ToArgb();
+            bool cardColorsChanged = _detailsCardFillArgb != cardFillArgb || _detailsCardBorderArgb != cardBorderArgb;
+            _detailsCardFillArgb = cardFillArgb;
+            _detailsCardBorderArgb = cardBorderArgb;
             _systemBackdropApplied = false;
             if (!highContrast && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22621))
             {
@@ -568,6 +651,12 @@ namespace TaskbarTemp
             }
 
             ApplyDetailsTheme(highContrast, dark);
+            if (cardColorsChanged || previousBackdrop != _systemBackdropApplied)
+                foreach (Panel section in _detailsContent.Controls)
+                {
+                    section.Invalidate();
+                    section.Controls.OfType<BufferedCategoryIcon>().FirstOrDefault()?.Invalidate();
+                }
         }
 
         private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
@@ -579,7 +668,7 @@ namespace TaskbarTemp
                 {
                     if (_disposed || _details == null || _details.IsDisposed) return;
                     ApplyWindowStyle();
-                    _details.Invalidate(true);
+                    _details.Invalidate();
                 }));
             }
             catch (InvalidOperationException) { }
@@ -587,13 +676,14 @@ namespace TaskbarTemp
 
         private void ApplyDetailsTheme(bool highContrast, bool dark)
         {
-            Color primary = highContrast ? SystemColors.WindowText : dark ? Color.FromArgb(241, 244, 248) : SystemColors.ControlText;
-            Color secondary = highContrast ? SystemColors.GrayText : dark ? Color.FromArgb(181, 190, 202) : Color.FromArgb(96, 106, 119);
+            Color primary = Color.FromArgb((highContrast ? SystemColors.WindowText : dark ? Color.FromArgb(241, 244, 248) : SystemColors.ControlText).ToArgb());
+            Color secondary = Color.FromArgb((highContrast ? SystemColors.GrayText : dark ? Color.FromArgb(181, 190, 202) : Color.FromArgb(96, 106, 119)).ToArgb());
             foreach (Panel section in _detailsContent.Controls)
             {
-                section.Invalidate();
+                section.Controls.OfType<BufferedCategoryIcon>().FirstOrDefault()?.SetTheme(
+                    TileFillColor(highContrast, dark), AccentColor(highContrast, dark));
                 if (section.Controls.Count == 0) continue;
-                foreach (Control control in section.Controls[0].Controls)
+                foreach (Control control in section.Controls.OfType<TableLayoutPanel>().First().Controls)
                 {
                     if (control is Label label)
                         label.ForeColor = string.Equals(label.Tag as string, "caption", StringComparison.Ordinal) ? secondary : primary;
@@ -798,19 +888,6 @@ namespace TaskbarTemp
             using var border = new Pen(CardBorderColor(_detailsHighContrast, _detailsDarkMode));
             e.Graphics.FillPath(fill, path);
             e.Graphics.DrawPath(border, path);
-
-            int tile = (int)(30 * scale), inset = (int)(10 * scale);
-            var tileBounds = new Rectangle(inset, inset, tile, tile);
-            using var tileBrush = new SolidBrush(TileFillColor(_detailsHighContrast, _detailsDarkMode));
-            using var tilePath = new GraphicsPath();
-            int radius = Math.Max(2, (int)(10 * scale));
-            tilePath.AddArc(tileBounds.Left, tileBounds.Top, radius, radius, 180, 90);
-            tilePath.AddArc(tileBounds.Right - radius, tileBounds.Top, radius, radius, 270, 90);
-            tilePath.AddArc(tileBounds.Right - radius, tileBounds.Bottom - radius, radius, radius, 0, 90);
-            tilePath.AddArc(tileBounds.Left, tileBounds.Bottom - radius, radius, radius, 90, 90);
-            tilePath.CloseFigure();
-            e.Graphics.FillPath(tileBrush, tilePath);
-            DrawCategoryIcon(e.Graphics, (string)panel.Tag, tileBounds, AccentColor(_detailsHighContrast, _detailsDarkMode), scale);
         }
 
         private static void DrawCategoryIcon(Graphics graphics, string category, Rectangle bounds, Color color, float scale)
@@ -867,6 +944,12 @@ namespace TaskbarTemp
                 Margin = new Padding(0, 0, 0, 8)
             };
             section.Paint += DrawRoundedPanel;
+
+            var icon = new BufferedCategoryIcon(tile, TileFillColor(_detailsHighContrast, _detailsDarkMode),
+                AccentColor(_detailsHighContrast, _detailsDarkMode))
+            {
+                Bounds = new Rectangle(10, 10, 30, 30)
+            };
 
             var layout = new TableLayoutPanel
             {
@@ -933,6 +1016,8 @@ namespace TaskbarTemp
             }
 
             section.Controls.Add(layout);
+            section.Controls.Add(icon);
+            icon.BringToFront();
             layout.Width = section.ClientSize.Width;
             layout.Height = layout.GetPreferredSize(new Size(layout.Width, 0)).Height;
             section.Height = layout.Height;
@@ -992,7 +1077,9 @@ namespace TaskbarTemp
             foreach (Panel section in _detailsContent.Controls)
             {
                 section.Width = width;
-                var layout = (TableLayoutPanel)section.Controls[0];
+                var layout = section.Controls.OfType<TableLayoutPanel>().First();
+                var icon = section.Controls.OfType<BufferedCategoryIcon>().FirstOrDefault();
+                if (icon != null) icon.Bounds = new Rectangle(scale(10), scale(10), scale(30), scale(30));
                 layout.Width = width;
                 layout.Padding = new Padding(scale(44), scale(7), scale(8), scale(7));
                 layout.ColumnStyles[0].Width = scale(40);

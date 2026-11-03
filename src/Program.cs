@@ -107,7 +107,7 @@ namespace TaskbarTemp
             _menu.Items.Add("详情", null, (s, e) => ShowDetails());
             _menu.Items.Add("复制数值", null, (s, e) => CopyValue());
             _menu.Items.Add(new ToolStripSeparator());
-            _menu.Items.Add("打开配置（style = mono/number/pill/ring）", null, (s, e) => OpenConfig());
+            _menu.Items.Add("图标样式设置（修改后重启生效）", null, (s, e) => OpenConfig());
             _menu.Items.Add("安装开机自启", null, (s, e) => InstallAutostart());
             _menu.Items.Add("移除开机自启", null, (s, e) => RemoveAutostart());
             _menu.Items.Add(new ToolStripSeparator());

@@ -1229,13 +1229,22 @@ namespace TaskbarTemp
                 // 用 PowerShell 创建任务并立即修电源条件（电池供电也启动/不停/无时限），
                 // 避免计划任务默认 StopIfGoingOnBatteries 拔电源杀进程的坑。
                 string script =
+                    "$ErrorActionPreference = 'Stop';" +
+                    "$owner = 'Ccmra404.TaskbarTemp.Startup.v1';" +
+                    "$task = Get-ScheduledTask -TaskName 'TaskbarTemp' -TaskPath '\\' -ErrorAction SilentlyContinue;" +
+                    "$exe = [IO.Path]::GetFullPath($env:TT_EXE);" +
+                    "$existing = $null;" +
+                    "if ($task -and $task.Actions.Count -eq 1 -and $task.Actions[0].Execute) { $existing = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($task.Actions[0].Execute.Trim().Trim([char]34))); };" +
+                    "$samePath = $existing -and [string]::Equals($existing, $exe, [StringComparison]::OrdinalIgnoreCase);" +
+                    "$owned = $task -and $task.Description -eq $owner;" +
+                    "if ($task -and -not $owned -and -not $samePath) { throw 'A different scheduled task already uses this name.'; };" +
                     "$a = New-ScheduledTaskAction -Execute $env:TT_EXE;" +
                     "$t = New-ScheduledTaskTrigger -AtLogOn;" +
                     "$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest;" +
                     "$s = New-ScheduledTaskSettingsSet -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries " +
                     "-ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable;" +
-                    "Register-ScheduledTask -TaskName TaskbarTemp -Action $a -Trigger $t -Principal $p -Settings $s -Force | Out-Null;" +
-                    "if ($?) { 'OK' } else { 'FAIL' }";
+                    "Register-ScheduledTask -TaskName 'TaskbarTemp' -TaskPath '\\' -Action $a -Trigger $t -Principal $p -Settings $s -Description $owner -Force | Out-Null;" +
+                    "'OK'";
                 var psi = new System.Diagnostics.ProcessStartInfo("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"" + script + "\"")
                 {
                     UseShellExecute = false,
@@ -1262,11 +1271,25 @@ namespace TaskbarTemp
         {
             try
             {
-                var psi = new System.Diagnostics.ProcessStartInfo("schtasks.exe", "/delete /tn \"TaskbarTemp\" /f")
+                string script =
+                    "$ErrorActionPreference = 'Stop';" +
+                    "$task = Get-ScheduledTask -TaskName 'TaskbarTemp' -TaskPath '\\' -ErrorAction SilentlyContinue;" +
+                    "$exe = [IO.Path]::GetFullPath($env:TT_EXE);" +
+                    "$existing = $null;" +
+                    "if ($task -and $task.Actions.Count -eq 1 -and $task.Actions[0].Execute) { $existing = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($task.Actions[0].Execute.Trim().Trim([char]34))); };" +
+                    "$samePath = $existing -and [string]::Equals($existing, $exe, [StringComparison]::OrdinalIgnoreCase);" +
+                    "if ($samePath) { Unregister-ScheduledTask -TaskName 'TaskbarTemp' -TaskPath '\\' -Confirm:$false; 'REMOVED' } else { 'KEPT' }";
+                var psi = new System.Diagnostics.ProcessStartInfo("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"" + script + "\"")
                 { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+                psi.EnvironmentVariables["TT_EXE"] = Application.ExecutablePath;
                 using var p = System.Diagnostics.Process.Start(psi);
+                string outp = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
                 p.WaitForExit();
-                MessageBox.Show(p.ExitCode == 0 ? "已移除开机自启。" : "移除失败（可能本就没有）。");
+                MessageBox.Show(p.ExitCode != 0 ? "移除失败：\n" + outp.Trim() : outp.Contains("REMOVED")
+                        ? "已移除开机自启。"
+                        : "未移除：当前同名任务没有指向此安装目录。",
+                    "TaskbarTemp", MessageBoxButtons.OK,
+                    p.ExitCode == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Error);
             }
             catch (Exception ex) { MessageBox.Show("移除失败：" + ex.Message); }
         }

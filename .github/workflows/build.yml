@@ -17,9 +17,32 @@ jobs:
         run: dotnet restore .\src\TaskbarTemp.csproj
       - name: Build
         run: dotnet build .\src\TaskbarTemp.csproj -c Release --no-restore
+      - name: Install Inno Setup 7.1.1
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.1-x64.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe' -OutFile $installer
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          $publisher = $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+          if ($signature.Status -ne 'Valid' -or $publisher -ne 'Pyrsys B.V.') { throw 'The Inno Setup installer signature is invalid.' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'InnoSetup7'
+          $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=$installDir") -Wait -PassThru
+          if ($process.ExitCode -ne 0 -or !(Test-Path -LiteralPath (Join-Path $installDir 'ISCC.exe'))) { throw 'Inno Setup installation failed.' }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          .\installer\Build-Installer.ps1 -InnoCompilerPath (Join-Path $env:RUNNER_TEMP 'InnoSetup7\ISCC.exe')
+          $installers = @(Get-ChildItem .\artifacts\installer -Filter 'TaskbarTemp-Setup-*-x64.exe' -File)
+          if ($installers.Count -ne 1 -or $installers[0].Length -lt 1MB) { throw 'The compiled installer is missing or unexpectedly small.' }
       - name: Test installer startup ownership
         shell: pwsh
         run: .\tests\Test-StartupOwnership.ps1
       - name: Test installer launch privileges
         shell: pwsh
         run: .\tests\Test-InstallerLaunchPrivilege.ps1
+      - name: Test installer startup trust boundary
+        shell: pwsh
+        run: .\tests\Test-InstallerTrustBoundary.ps1
+      - name: Test uninstall ignores writable app scripts
+        shell: pwsh
+        run: .\tests\Test-InstallerUninstallTrustBoundary.ps1 -InstallerPath (Get-ChildItem .\artifacts\installer -Filter 'TaskbarTemp-Setup-*-x64.exe' -File | Select-Object -First 1 -ExpandProperty FullName)

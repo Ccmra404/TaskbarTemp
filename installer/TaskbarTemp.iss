@@ -35,12 +35,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"; InfoAfterFile: "Installat
 [CustomMessages]
 chinesesimplified.DesktopIcon=创建桌面快捷方式
 english.DesktopIcon=Create a desktop shortcut
-chinesesimplified.Autostart=设置开机自启（将更新已有的 TaskbarTemp 自启位置）
-english.Autostart=Start with Windows (updates any existing TaskbarTemp startup path)
+chinesesimplified.Autostart=设置开机自启（仅更新由本程序管理或指向本程序的任务）
+english.Autostart=Start with Windows (updates only a TaskbarTemp-owned or matching legacy task)
 chinesesimplified.Launch=启动 TaskbarTemp
 english.Launch=Launch TaskbarTemp
-chinesesimplified.StartupFailed=程序已安装，但开机自启设置失败。可在程序托盘菜单中重新设置。
-english.StartupFailed=The application was installed, but startup configuration failed. You can retry from its tray menu.
+chinesesimplified.StartupFailed=程序已安装，但开机自启设置失败。若存在旧版或其他同名任务，请先确认其属于 TaskbarTemp 后再重试。
+english.StartupFailed=The application was installed, but startup configuration failed. Check whether an older or unrelated task already uses the TaskbarTemp name.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:DesktopIcon}"; Flags: unchecked
@@ -48,7 +48,7 @@ Name: "autostart"; Description: "{cm:Autostart}"; Flags: unchecked
 
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "config.ini,*.log,*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "ManageStartup.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "ManageStartup.ps1"; DestDir: "{autopf}\TaskbarTemp\Support"; Flags: ignoreversion
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 
@@ -60,7 +60,7 @@ Name: "{autodesktop}\TaskbarTemp"; Filename: "{app}\TaskbarTemp.exe"; WorkingDir
 Filename: "{app}\TaskbarTemp.exe"; Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent runascurrentuser
 
 [UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\ManageStartup.ps1"" -Action Remove -ExecutablePath ""{app}\TaskbarTemp.exe"""; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "RemoveOwnedTaskbarTempStartup"
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{autopf}\TaskbarTemp\Support\ManageStartup.ps1"" -Action Remove -ExecutablePath ""{app}\TaskbarTemp.exe"""; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "RemoveOwnedTaskbarTempStartup"
 
 [Code]
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -70,7 +70,7 @@ var
 begin
   if (CurStep = ssPostInstall) and WizardIsTaskSelected('autostart') then begin
     Args := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
-      ExpandConstant('{app}\ManageStartup.ps1') + '" -Action Install -ExecutablePath "' +
+      ExpandConstant('{autopf}\TaskbarTemp\Support\ManageStartup.ps1') + '" -Action Install -ExecutablePath "' +
       ExpandConstant('{app}\TaskbarTemp.exe') + '"';
     if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Args, '', SW_HIDE,
       ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then

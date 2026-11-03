@@ -29,7 +29,7 @@ The published application is a folder containing `TaskbarTemp.exe` and its runti
 .\installer\Build-Installer.ps1 -InnoCompilerPath 'C:\Program Files\Inno Setup 7\ISCC.exe'
 ```
 
-安装包生成在 `artifacts/installer/`。安装时可选择目录、桌面快捷方式及开机自启；选择自启会更新已有的 TaskbarTemp 启动任务。程序运行需要管理员权限；安装包自带 .NET 运行时，但不会自动安装 PawnIO 硬件驱动。CPU 温度读不到时，请检查驱动和设备支持情况。
+安装包生成在 `artifacts/installer/`。安装时可选择目录、桌面快捷方式及开机自启；自启只会更新已标记为 TaskbarTemp 所有或指向当前程序的旧任务，其他同名任务会保留。程序运行需要管理员权限；安装包自带 .NET 运行时，但不会自动安装 PawnIO 硬件驱动。CPU 温度读不到时，请检查驱动和设备支持情况。
 
 安装或卸载不会删除已有的 `config.ini`，不同安装目录之间不会自动迁移配置。卸载时，仅当 TaskbarTemp 开机任务指向被卸载的程序时才移除该任务。
 

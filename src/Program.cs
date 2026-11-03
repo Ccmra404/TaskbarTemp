@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Management;
 using System.Threading;
+using Microsoft.Win32;
 using System.Windows.Forms;
 using LibreHardwareMonitor.Hardware;
 
@@ -44,6 +45,8 @@ namespace TaskbarTemp
         private Label _gpuNameLabel, _gpuTempCaption, _gpuTempLabel, _gpuLoadLabel, _vramLabel;
         private Label _memoryLabel, _memoryValue;
         private Label _networkDownSpeed, _networkUpSpeed, _npuName, _npuUsageLabel;
+        private bool _systemBackdropApplied;
+        private bool? _gpuTempRowVisible;
         private readonly HashSet<string> _physicalNetworkNames;
         private readonly HashSet<string> _hardwareFailures = new(StringComparer.OrdinalIgnoreCase);
 
@@ -323,7 +326,7 @@ namespace TaskbarTemp
                     MinimumSize = new Size(320, 220),
                     Font = SystemFonts.MessageBoxFont,
                     AutoScaleMode = AutoScaleMode.Dpi,
-                    Opacity = System.Windows.Forms.SystemInformation.HighContrast ? 1.0 : 0.97,
+                    Opacity = 1.0,
                     FormBorderStyle = FormBorderStyle.SizableToolWindow,
                     StartPosition = FormStartPosition.Manual,
                     MaximizeBox = false,
@@ -344,25 +347,105 @@ namespace TaskbarTemp
                 _memoryValue = memoryRows[0];
                 _details.Controls.Add(_detailsContent);
                 _detailsContent.Resize += (s, e) => LayoutDetails();
-                _details.DpiChanged += (s, e) => LayoutDetails();
+                _details.DpiChanged += (s, e) =>
+                {
+                    var workingArea = Screen.FromControl(_details).WorkingArea;
+                    FitDetailsToScreen(workingArea);
+                    PositionDetails(workingArea);
+                };
                 _details.FormClosing += (s, e) => { if (!_exiting) { e.Cancel = true; _details.Hide(); } };
             }
 
             UpdateDetails();
             var area = Screen.FromPoint(Cursor.Position).WorkingArea;
             if (_detailsScreenArea != area) FitDetailsToScreen(area);
+            ApplyWindowStyle();
             _details.Show();
-            ApplyRoundedCorners();
             PositionDetails(area);
             _details.Activate();
         }
 
-        private void ApplyRoundedCorners()
+        private void ApplyWindowStyle()
         {
-            int preference = 2; // DWMWCP_ROUND
-            try { DwmSetWindowAttribute(_details.Handle, 33, ref preference, sizeof(int)); }
-            catch (DllNotFoundException) { }
+            bool highContrast = System.Windows.Forms.SystemInformation.HighContrast;
+            bool dark = IsDarkMode();
+            _systemBackdropApplied = false;
+            if (!highContrast && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22621))
+            {
+                int backdropType = 3; // DWMSBT_TRANSIENTWINDOW: Desktop Acrylic for a flyout.
+                try
+                {
+                    if (DwmSetWindowAttribute(_details.Handle, 38, ref backdropType, sizeof(int)) == 0)
+                    {
+                        _details.BackColor = Color.Transparent;
+                        _detailsContent.BackColor = Color.Transparent;
+                        _details.Opacity = 1.0;
+                        _systemBackdropApplied = true;
+                    }
+                }
+                catch (ArgumentException) { }
+                catch (DllNotFoundException) { }
+            }
+
+            if (!_systemBackdropApplied)
+            {
+                Color background = highContrast ? SystemColors.Window : dark ? Color.FromArgb(30, 33, 38) : Color.FromArgb(235, 240, 247);
+                _details.BackColor = background;
+                _detailsContent.BackColor = background;
+                _details.Opacity = highContrast ? 1.0 : 0.97;
+            }
+
+            if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
+            {
+                if (!highContrast)
+                {
+                    int darkMode = dark ? 1 : 0;
+                    DwmSetWindowAttribute(_details.Handle, 20, ref darkMode, sizeof(int));
+                }
+                int preference = 2; // DWMWCP_ROUND
+                DwmSetWindowAttribute(_details.Handle, 33, ref preference, sizeof(int));
+            }
+
+            ApplyDetailsTheme(highContrast, dark);
         }
+
+        private void ApplyDetailsTheme(bool highContrast, bool dark)
+        {
+            Color primary = highContrast ? SystemColors.WindowText : dark ? Color.FromArgb(241, 244, 248) : SystemColors.ControlText;
+            Color secondary = highContrast ? SystemColors.GrayText : dark ? Color.FromArgb(181, 190, 202) : Color.FromArgb(96, 106, 119);
+            foreach (Panel section in _detailsContent.Controls)
+            {
+                section.Invalidate();
+                if (section.Controls.Count == 0) continue;
+                foreach (Control control in section.Controls[0].Controls)
+                {
+                    if (control is Label label)
+                        label.ForeColor = string.Equals(label.Tag as string, "caption", StringComparison.Ordinal) ? secondary : primary;
+                    else if (control is FlowLayoutPanel speeds)
+                        foreach (Label speed in speeds.Controls.OfType<Label>()) speed.ForeColor = primary;
+                }
+            }
+        }
+
+        private static bool IsDarkMode()
+        {
+            if (System.Windows.Forms.SystemInformation.HighContrast) return false;
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+                return key?.GetValue("AppsUseLightTheme") is int light && light == 0;
+            }
+            catch (System.Security.SecurityException) { return false; }
+        }
+
+        private static Color CardFillColor(bool highContrast, bool dark) =>
+            highContrast ? SystemColors.Window : dark ? Color.FromArgb(39, 43, 50) : Color.FromArgb(250, 252, 255);
+        private static Color CardBorderColor(bool highContrast, bool dark) =>
+            highContrast ? SystemColors.WindowText : dark ? Color.FromArgb(67, 74, 84) : Color.FromArgb(220, 229, 240);
+        private static Color TileFillColor(bool highContrast, bool dark) =>
+            highContrast ? SystemColors.Highlight : dark ? Color.FromArgb(49, 61, 79) : Color.FromArgb(226, 237, 252);
+        private static Color AccentColor(bool highContrast, bool dark) =>
+            highContrast ? SystemColors.HighlightText : dark ? Color.FromArgb(174, 201, 244) : Color.FromArgb(49, 105, 179);
 
         [System.Runtime.InteropServices.DllImport("dwmapi.dll", PreserveSig = true)]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, uint size);
@@ -533,14 +616,16 @@ namespace TaskbarTemp
             path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
             path.CloseFigure();
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var fill = new SolidBrush(System.Windows.Forms.SystemInformation.HighContrast ? SystemColors.Window : Color.FromArgb(250, 252, 255));
-            using var border = new Pen(System.Windows.Forms.SystemInformation.HighContrast ? SystemColors.WindowText : Color.FromArgb(220, 229, 240));
+            bool highContrast = System.Windows.Forms.SystemInformation.HighContrast;
+            bool dark = IsDarkMode();
+            using var fill = new SolidBrush(CardFillColor(highContrast, dark));
+            using var border = new Pen(CardBorderColor(highContrast, dark));
             e.Graphics.FillPath(fill, path);
             e.Graphics.DrawPath(border, path);
 
             int tile = (int)(30 * scale), inset = (int)(10 * scale);
             var tileBounds = new Rectangle(inset, inset, tile, tile);
-            using var tileBrush = new SolidBrush(System.Windows.Forms.SystemInformation.HighContrast ? SystemColors.Highlight : Color.FromArgb(226, 237, 252));
+            using var tileBrush = new SolidBrush(TileFillColor(highContrast, dark));
             using var tilePath = new GraphicsPath();
             int radius = Math.Max(2, (int)(10 * scale));
             tilePath.AddArc(tileBounds.Left, tileBounds.Top, radius, radius, 180, 90);
@@ -549,9 +634,51 @@ namespace TaskbarTemp
             tilePath.AddArc(tileBounds.Left, tileBounds.Bottom - radius, radius, radius, 90, 90);
             tilePath.CloseFigure();
             e.Graphics.FillPath(tileBrush, tilePath);
-            TextRenderer.DrawText(e.Graphics, (string)panel.Tag, SystemFonts.MessageBoxFont, tileBounds,
-                System.Windows.Forms.SystemInformation.HighContrast ? SystemColors.HighlightText : Color.FromArgb(49, 105, 179),
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            DrawCategoryIcon(e.Graphics, (string)panel.Tag, tileBounds, AccentColor(highContrast, dark), scale);
+        }
+
+        private static void DrawCategoryIcon(Graphics graphics, string category, Rectangle bounds, Color color, float scale)
+        {
+            int u(float value) => (int)Math.Round(value * scale);
+            using var pen = new Pen(color, Math.Max(1.2f, 1.5f * scale)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+            int x = bounds.X, y = bounds.Y;
+            switch (category)
+            {
+                case "CPU":
+                    graphics.DrawRectangle(pen, x + u(10), y + u(10), u(10), u(10));
+                    for (int i = 0; i < 3; i++)
+                    {
+                        int offset = u(12 + i * 3);
+                        graphics.DrawLine(pen, x + offset, y + u(6), x + offset, y + u(10));
+                        graphics.DrawLine(pen, x + offset, y + u(20), x + offset, y + u(24));
+                        graphics.DrawLine(pen, x + u(6), y + offset, x + u(10), y + offset);
+                        graphics.DrawLine(pen, x + u(20), y + offset, x + u(24), y + offset);
+                    }
+                    break;
+                case "GPU":
+                    graphics.DrawRectangle(pen, x + u(6), y + u(9), u(17), u(12));
+                    graphics.DrawEllipse(pen, x + u(10), y + u(11), u(8), u(8));
+                    graphics.DrawLine(pen, x + u(23), y + u(12), x + u(26), y + u(12));
+                    graphics.DrawLine(pen, x + u(23), y + u(16), x + u(26), y + u(16));
+                    break;
+                case "NPU":
+                    graphics.DrawLine(pen, x + u(9), y + u(17), x + u(15), y + u(10));
+                    graphics.DrawLine(pen, x + u(15), y + u(10), x + u(22), y + u(17));
+                    graphics.DrawLine(pen, x + u(9), y + u(17), x + u(17), y + u(23));
+                    graphics.DrawLine(pen, x + u(22), y + u(17), x + u(17), y + u(23));
+                    graphics.DrawEllipse(pen, x + u(6), y + u(14), u(6), u(6));
+                    graphics.DrawEllipse(pen, x + u(12), y + u(7), u(6), u(6));
+                    graphics.DrawEllipse(pen, x + u(19), y + u(14), u(6), u(6));
+                    graphics.DrawEllipse(pen, x + u(14), y + u(20), u(6), u(6));
+                    break;
+                case "RAM":
+                    graphics.DrawRectangle(pen, x + u(5), y + u(10), u(20), u(10));
+                    for (int i = 0; i < 4; i++)
+                        graphics.DrawLine(pen, x + u(9 + i * 4), y + u(12), x + u(9 + i * 4), y + u(18));
+                    for (int i = 0; i < 4; i++)
+                        graphics.DrawLine(pen, x + u(8 + i * 4), y + u(20), x + u(8 + i * 4), y + u(23));
+                    break;
+            }
         }
         private Label AddSection(string tile, (string, string)[] rows, out Label[] values, bool withNetwork = false)
         {
@@ -584,6 +711,7 @@ namespace TaskbarTemp
                 Font = new Font(SystemFonts.MessageBoxFont, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleLeft,
                 UseMnemonic = false,
+                Tag = "title",
                 Margin = new Padding(3, 2, 3, 4)
             };
             layout.Controls.Add(name, 0, 0);
@@ -600,7 +728,7 @@ namespace TaskbarTemp
                     Text = rows[i].Item1,
                     AutoSize = true,
                     Anchor = AnchorStyles.Left,
-                    ForeColor = SystemColors.GrayText,
+                    Tag = "caption",
                     Margin = new Padding(3, 2, 6, 2)
                 }, 0, row);
 
@@ -619,7 +747,7 @@ namespace TaskbarTemp
             {
                 int row = rows.Length + 1;
                 layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-                layout.Controls.Add(new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = SystemColors.GrayText, Margin = new Padding(3, 2, 6, 2) }, 0, row);
+                layout.Controls.Add(new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, Tag = "caption", Margin = new Padding(3, 2, 6, 2) }, 0, row);
                 var speeds = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = Padding.Empty, Dock = DockStyle.Fill };
                 _networkDownSpeed = new Label { AutoSize = true, Margin = new Padding(3, 2, 10, 2) };
                 _networkUpSpeed = new Label { AutoSize = true, Margin = new Padding(3, 2, 3, 2) };
@@ -638,45 +766,53 @@ namespace TaskbarTemp
 
         private void UpdateDetails()
         {
-            SetLabelText(_cpuName, string.IsNullOrEmpty(_hwName) ? "CPU" : _hwName);
-            SetLabelText(_cpuTemp, _temp.HasValue ? $"{_temp.Value:0.0} °C" : "未读到温度（请以管理员身份运行）");
-            SetLabelText(_cpuLoad, _load.HasValue ? $"{_load.Value:0} %" : "—");
-            SetLabelText(_cpuClock, _clock.HasValue ? $"{_clock.Value / 1000f:0.00} GHz" : "—");
+            bool layoutChanged = false;
+            layoutChanged |= SetLabelText(_cpuName, string.IsNullOrEmpty(_hwName) ? "CPU" : _hwName);
+            layoutChanged |= SetLabelText(_cpuTemp, _temp.HasValue ? $"{_temp.Value:0.0} °C" : "未读到温度（请以管理员身份运行）");
+            layoutChanged |= SetLabelText(_cpuLoad, _load.HasValue ? $"{_load.Value:0} %" : "—");
+            layoutChanged |= SetLabelText(_cpuClock, _clock.HasValue ? $"{_clock.Value / 1000f:0.00} GHz" : "—");
 
-            SetLabelText(_gpuNameLabel, string.IsNullOrEmpty(_gpuName) ? "GPU" : _gpuName);
+            layoutChanged |= SetLabelText(_gpuNameLabel, string.IsNullOrEmpty(_gpuName) ? "GPU" : _gpuName);
             bool showGpuTemp = _gpuTemp.HasValue;
-            _gpuTempCaption.Visible = showGpuTemp;
-            _gpuTempLabel.Visible = showGpuTemp;
-            if (showGpuTemp) SetLabelText(_gpuTempLabel, $"{_gpuTemp.Value:0.0} °C");
-            SetLabelText(_gpuLoadLabel, _gpuLoad.HasValue ? $"{_gpuLoad.Value:0.0} %" : "—");
-            SetLabelText(_vramLabel, _vramUsed.HasValue && _vramTotal.HasValue
+            if (_gpuTempRowVisible != showGpuTemp)
+            {
+                _gpuTempCaption.Visible = showGpuTemp;
+                _gpuTempLabel.Visible = showGpuTemp;
+                _gpuTempRowVisible = showGpuTemp;
+                layoutChanged = true;
+            }
+            if (showGpuTemp) layoutChanged |= SetLabelText(_gpuTempLabel, $"{_gpuTemp.Value:0.0} °C");
+            layoutChanged |= SetLabelText(_gpuLoadLabel, _gpuLoad.HasValue ? $"{_gpuLoad.Value:0.0} %" : "—");
+            layoutChanged |= SetLabelText(_vramLabel, _vramUsed.HasValue && _vramTotal.HasValue
                 ? $"共享 {_vramUsed.Value / 1024f:0.0} / {_vramTotal.Value / 1024f:0.0} GB"
                 : "—");
 
-            SetLabelText(_memoryLabel, "物理内存");
-            SetLabelText(_memoryValue, _memUsedGb.HasValue && _memTotalGb.HasValue
+            layoutChanged |= SetLabelText(_memoryLabel, "物理内存");
+            layoutChanged |= SetLabelText(_memoryValue, _memUsedGb.HasValue && _memTotalGb.HasValue
                 ? $"{_memUsedGb.Value:0.0} / {_memTotalGb.Value:0.0} GB"
                 : "—");
 
-            SetLabelText(_networkDownSpeed, "↓ " + FormatNetworkSpeed(_networkDownloadBps));
-            SetLabelText(_networkUpSpeed, "↑ " + FormatNetworkSpeed(_networkUploadBps));
+            layoutChanged |= SetLabelText(_networkDownSpeed, "↓ " + FormatNetworkSpeed(_networkDownloadBps));
+            layoutChanged |= SetLabelText(_networkUpSpeed, "↑ " + FormatNetworkSpeed(_networkUploadBps));
 
-            SetLabelText(_npuName, "NPU");
-            SetLabelText(_npuUsageLabel, _npuUsage.HasValue ? $"{_npuUsage.Value:0.0} %" : "—");
-            LayoutDetails();
+            layoutChanged |= SetLabelText(_npuName, "NPU");
+            layoutChanged |= SetLabelText(_npuUsageLabel, _npuUsage.HasValue ? $"{_npuUsage.Value:0.0} %" : "—");
+            if (layoutChanged) LayoutDetails();
         }
 
-        private static void SetLabelText(Label label, string text)
+        private static bool SetLabelText(Label label, string text)
         {
-            if (label != null && !string.Equals(label.Text, text, StringComparison.Ordinal))
-                label.Text = text;
+            if (label == null || string.Equals(label.Text, text, StringComparison.Ordinal)) return false;
+            Size preferredSize = label.GetPreferredSize(Size.Empty);
+            label.Text = text;
+            return label.GetPreferredSize(Size.Empty) != preferredSize;
         }
 
         private void LayoutDetails()
         {
             if (_detailsContent == null || _detailsContent.ClientSize.Width <= 0) return;
             int scale(int value) => (int)Math.Round(value * _detailsContent.DeviceDpi / 96.0);
-            int width = Math.Max(scale(200), _detailsContent.ClientSize.Width - _detailsContent.Padding.Horizontal - scale(12));
+            int width = Math.Max(1, _detailsContent.ClientSize.Width - _detailsContent.Padding.Horizontal - scale(20));
             foreach (Panel section in _detailsContent.Controls)
             {
                 section.Width = width;
@@ -684,9 +820,9 @@ namespace TaskbarTemp
                 layout.Width = width;
                 layout.Padding = new Padding(scale(52), scale(7), scale(8), scale(7));
                 layout.ColumnStyles[0].Width = scale(50);
-                layout.GetControlFromPosition(0, 0).MaximumSize = new Size(Math.Max(scale(80), width - layout.Padding.Horizontal), 0);
+                layout.GetControlFromPosition(0, 0).MaximumSize = new Size(Math.Max(scale(60), width - layout.Padding.Horizontal), 0);
                 for (int row = 1; row < layout.RowCount; row++)
-                    layout.GetControlFromPosition(1, row).MaximumSize = new Size(Math.Max(scale(80), width - layout.Padding.Horizontal - scale(50)), 0);
+                    layout.GetControlFromPosition(1, row).MaximumSize = new Size(Math.Max(scale(60), width - layout.Padding.Horizontal - scale(50)), 0);
                 layout.PerformLayout();
                 layout.Height = layout.GetPreferredSize(new Size(width, 0)).Height;
                 section.Height = layout.Height;
@@ -696,22 +832,32 @@ namespace TaskbarTemp
         private void FitDetailsToScreen(Rectangle area)
         {
             int scale(int value) => (int)Math.Round(value * _details.DeviceDpi / 96.0);
-            int width = Math.Min(scale(360), Math.Max(scale(280), area.Width - scale(24)));
+            int frameWidth = Math.Max(0, _details.Width - _details.ClientSize.Width);
+            int frameHeight = Math.Max(0, _details.Height - _details.ClientSize.Height);
+            int maxWidth = Math.Max(1, area.Width - scale(24) - frameWidth);
+            int maxHeight = Math.Max(1, area.Height - scale(48) - frameHeight);
+            _details.MinimumSize = new Size(Math.Min(scale(320) + frameWidth, maxWidth + frameWidth), Math.Min(scale(180) + frameHeight, maxHeight + frameHeight));
+            int width = Math.Min(scale(360), maxWidth);
             _details.ClientSize = new Size(width, _details.ClientSize.Height);
             LayoutDetails();
             int contentHeight = _detailsContent.Padding.Vertical + _detailsContent.Controls
                 .Cast<Control>().Sum(control => control.Height + control.Margin.Vertical);
-            _details.ClientSize = new Size(width, Math.Min(Math.Max(scale(250), contentHeight), Math.Max(scale(180), area.Height - scale(60))));
+            _details.ClientSize = new Size(width, Math.Min(Math.Max(scale(220), contentHeight), maxHeight));
             _detailsScreenArea = area;
         }
 
         private void PositionDetails(Rectangle area)
         {
-            if (_details.Width > area.Width - 24 || _details.Height > area.Height - 24)
-                _details.ClientSize = new Size(Math.Min(_details.ClientSize.Width, area.Width - 24), Math.Min(_details.ClientSize.Height, area.Height - 24));
+            int scale(int value) => (int)Math.Round(value * _details.DeviceDpi / 96.0);
+            int frameWidth = Math.Max(0, _details.Width - _details.ClientSize.Width);
+            int frameHeight = Math.Max(0, _details.Height - _details.ClientSize.Height);
+            int maxWidth = Math.Max(1, area.Width - scale(24) - frameWidth);
+            int maxHeight = Math.Max(1, area.Height - scale(24) - frameHeight);
+            if (_details.Width > area.Width - scale(24) || _details.Height > area.Height - scale(24))
+                _details.ClientSize = new Size(Math.Min(_details.ClientSize.Width, maxWidth), Math.Min(_details.ClientSize.Height, maxHeight));
             _details.Location = new Point(
-                Math.Max(area.Left + 12, area.Right - _details.Width - 12),
-                Math.Max(area.Top + 12, area.Bottom - _details.Height - 12));
+                Math.Max(area.Left + scale(12), area.Right - _details.Width - scale(12)),
+                Math.Max(area.Top + scale(12), area.Bottom - _details.Height - scale(12)));
         }
 
         private void CopyValue()

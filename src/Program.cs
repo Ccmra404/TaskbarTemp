@@ -767,8 +767,8 @@ namespace TaskbarTemp
                 layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
                 layout.Controls.Add(new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, Tag = "caption", Margin = new Padding(3, 2, 6, 2) }, 0, row);
                 var speeds = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty, Dock = DockStyle.Fill };
-                _networkDownSpeed = new Label { AutoSize = true, Margin = new Padding(3, 2, 6, 2) };
-                _networkUpSpeed = new Label { AutoSize = true, Margin = new Padding(3, 2, 0, 2) };
+                _networkDownSpeed = new Label { AutoSize = true, Margin = Padding.Empty };
+                _networkUpSpeed = new Label { AutoSize = true, Margin = Padding.Empty };
                 speeds.Controls.Add(_networkDownSpeed);
                 speeds.Controls.Add(_networkUpSpeed);
                 layout.Controls.Add(speeds, 1, row);
@@ -830,17 +830,17 @@ namespace TaskbarTemp
         {
             if (_detailsContent == null || _detailsContent.ClientSize.Width <= 0) return;
             int scale(int value) => (int)Math.Round(value * _detailsContent.DeviceDpi / 96.0);
-            int width = Math.Max(1, _detailsContent.ClientSize.Width - _detailsContent.Padding.Horizontal - scale(20));
+            int width = Math.Max(1, _detailsContent.ClientSize.Width - _detailsContent.Padding.Horizontal - scale(44));
             foreach (Panel section in _detailsContent.Controls)
             {
                 section.Width = width;
                 var layout = (TableLayoutPanel)section.Controls[0];
                 layout.Width = width;
-                layout.Padding = new Padding(scale(48), scale(7), scale(8), scale(7));
-                layout.ColumnStyles[0].Width = scale(44);
+                layout.Padding = new Padding(scale(44), scale(7), scale(8), scale(7));
+                layout.ColumnStyles[0].Width = scale(40);
                 layout.GetControlFromPosition(0, 0).MaximumSize = new Size(Math.Max(scale(60), width - layout.Padding.Horizontal), 0);
                 for (int row = 1; row < layout.RowCount; row++)
-                    layout.GetControlFromPosition(1, row).MaximumSize = new Size(Math.Max(scale(60), width - layout.Padding.Horizontal - scale(44)), 0);
+                    layout.GetControlFromPosition(1, row).MaximumSize = new Size(Math.Max(scale(60), width - layout.Padding.Horizontal - scale(40)), 0);
                 layout.PerformLayout();
                 layout.Height = layout.GetPreferredSize(new Size(width, 0)).Height;
                 section.Height = layout.Height;

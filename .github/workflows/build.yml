@@ -20,3 +20,6 @@ jobs:
       - name: Test installer startup ownership
         shell: pwsh
         run: .\tests\Test-StartupOwnership.ps1
+      - name: Test installer launch privileges
+        shell: pwsh
+        run: .\tests\Test-InstallerLaunchPrivilege.ps1

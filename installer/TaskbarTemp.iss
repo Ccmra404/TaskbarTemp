@@ -57,7 +57,7 @@ Name: "{autoprograms}\TaskbarTemp"; Filename: "{app}\TaskbarTemp.exe"; WorkingDi
 Name: "{autodesktop}\TaskbarTemp"; Filename: "{app}\TaskbarTemp.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\TaskbarTemp.exe"; Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\TaskbarTemp.exe"; Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent runascurrentuser
 
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\ManageStartup.ps1"" -Action Remove -ExecutablePath ""{app}\TaskbarTemp.exe"""; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "RemoveOwnedTaskbarTempStartup"

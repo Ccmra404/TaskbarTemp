@@ -46,6 +46,7 @@ namespace TaskbarTemp
         private Label _memoryLabel, _memoryValue;
         private Label _networkDownSpeed, _networkUpSpeed, _npuName, _npuUsageLabel;
         private bool _systemBackdropApplied;
+        private bool _detailsDarkMode, _detailsHighContrast;
         private bool? _gpuTempRowVisible;
         private readonly HashSet<string> _physicalNetworkNames;
         private readonly HashSet<string> _hardwareFailures = new(StringComparer.OrdinalIgnoreCase);
@@ -61,7 +62,7 @@ namespace TaskbarTemp
         private bool _loggedNetworkRead, _loggedNpuRead;
         private bool _loggedNpuProbe;
         private bool _exiting;
-        private bool _disposed;
+        private volatile bool _disposed;
         private DateTime _nextNpuSampleUtc = DateTime.MinValue;
 
         private float? _temp;
@@ -91,6 +92,9 @@ namespace TaskbarTemp
                 "TaskbarTemp", "run.log");
             try { Directory.CreateDirectory(Path.GetDirectoryName(_logPath)); } catch { }
             _physicalNetworkNames = ReadPhysicalNetworkNames();
+            try { SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged; }
+            catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException || ex is InvalidOperationException)
+            { Log("Theme change notifications unavailable: " + ex.Message); }
 
             _computer = new Computer
             {
@@ -367,8 +371,9 @@ namespace TaskbarTemp
 
         private void ApplyWindowStyle()
         {
-            bool highContrast = System.Windows.Forms.SystemInformation.HighContrast;
+            bool highContrast = _detailsHighContrast = System.Windows.Forms.SystemInformation.HighContrast;
             bool dark = IsDarkMode();
+            _detailsDarkMode = dark;
             _systemBackdropApplied = false;
             if (!highContrast && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22621))
             {
@@ -409,6 +414,21 @@ namespace TaskbarTemp
             ApplyDetailsTheme(highContrast, dark);
         }
 
+        private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+        {
+            if (_disposed || _details == null || _details.IsDisposed || !_details.IsHandleCreated) return;
+            try
+            {
+                _details.BeginInvoke((Action)(() =>
+                {
+                    if (_disposed || _details == null || _details.IsDisposed) return;
+                    ApplyWindowStyle();
+                    _details.Invalidate(true);
+                }));
+            }
+            catch (InvalidOperationException) { }
+        }
+
         private void ApplyDetailsTheme(bool highContrast, bool dark)
         {
             Color primary = highContrast ? SystemColors.WindowText : dark ? Color.FromArgb(241, 244, 248) : SystemColors.ControlText;
@@ -439,7 +459,7 @@ namespace TaskbarTemp
         }
 
         private static Color CardFillColor(bool highContrast, bool dark) =>
-            highContrast ? SystemColors.Window : dark ? Color.FromArgb(39, 43, 50) : Color.FromArgb(250, 252, 255);
+            highContrast ? SystemColors.Window : dark ? Color.FromArgb(224, 39, 43, 50) : Color.FromArgb(224, 250, 252, 255);
         private static Color CardBorderColor(bool highContrast, bool dark) =>
             highContrast ? SystemColors.WindowText : dark ? Color.FromArgb(67, 74, 84) : Color.FromArgb(220, 229, 240);
         private static Color TileFillColor(bool highContrast, bool dark) =>
@@ -602,7 +622,7 @@ namespace TaskbarTemp
             if (speed >= 1_024) return $"{speed / 1_024:0} KB/s";
             return $"{speed:0} B/s";
         }
-        private static void DrawRoundedPanel(object sender, PaintEventArgs e)
+        private void DrawRoundedPanel(object sender, PaintEventArgs e)
         {
             var panel = (Panel)sender;
             float scale = panel.DeviceDpi / 96f;
@@ -616,16 +636,14 @@ namespace TaskbarTemp
             path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
             path.CloseFigure();
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            bool highContrast = System.Windows.Forms.SystemInformation.HighContrast;
-            bool dark = IsDarkMode();
-            using var fill = new SolidBrush(CardFillColor(highContrast, dark));
-            using var border = new Pen(CardBorderColor(highContrast, dark));
+            using var fill = new SolidBrush(CardFillColor(_detailsHighContrast, _detailsDarkMode));
+            using var border = new Pen(CardBorderColor(_detailsHighContrast, _detailsDarkMode));
             e.Graphics.FillPath(fill, path);
             e.Graphics.DrawPath(border, path);
 
             int tile = (int)(30 * scale), inset = (int)(10 * scale);
             var tileBounds = new Rectangle(inset, inset, tile, tile);
-            using var tileBrush = new SolidBrush(TileFillColor(highContrast, dark));
+            using var tileBrush = new SolidBrush(TileFillColor(_detailsHighContrast, _detailsDarkMode));
             using var tilePath = new GraphicsPath();
             int radius = Math.Max(2, (int)(10 * scale));
             tilePath.AddArc(tileBounds.Left, tileBounds.Top, radius, radius, 180, 90);
@@ -634,7 +652,7 @@ namespace TaskbarTemp
             tilePath.AddArc(tileBounds.Left, tileBounds.Bottom - radius, radius, radius, 90, 90);
             tilePath.CloseFigure();
             e.Graphics.FillPath(tileBrush, tilePath);
-            DrawCategoryIcon(e.Graphics, (string)panel.Tag, tileBounds, AccentColor(highContrast, dark), scale);
+            DrawCategoryIcon(e.Graphics, (string)panel.Tag, tileBounds, AccentColor(_detailsHighContrast, _detailsDarkMode), scale);
         }
 
         private static void DrawCategoryIcon(Graphics graphics, string category, Rectangle bounds, Color color, float scale)
@@ -748,9 +766,9 @@ namespace TaskbarTemp
                 int row = rows.Length + 1;
                 layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
                 layout.Controls.Add(new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, Tag = "caption", Margin = new Padding(3, 2, 6, 2) }, 0, row);
-                var speeds = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = Padding.Empty, Dock = DockStyle.Fill };
-                _networkDownSpeed = new Label { AutoSize = true, Margin = new Padding(3, 2, 10, 2) };
-                _networkUpSpeed = new Label { AutoSize = true, Margin = new Padding(3, 2, 3, 2) };
+                var speeds = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty, Dock = DockStyle.Fill };
+                _networkDownSpeed = new Label { AutoSize = true, Margin = new Padding(3, 2, 6, 2) };
+                _networkUpSpeed = new Label { AutoSize = true, Margin = new Padding(3, 2, 0, 2) };
                 speeds.Controls.Add(_networkDownSpeed);
                 speeds.Controls.Add(_networkUpSpeed);
                 layout.Controls.Add(speeds, 1, row);
@@ -818,11 +836,11 @@ namespace TaskbarTemp
                 section.Width = width;
                 var layout = (TableLayoutPanel)section.Controls[0];
                 layout.Width = width;
-                layout.Padding = new Padding(scale(52), scale(7), scale(8), scale(7));
-                layout.ColumnStyles[0].Width = scale(50);
+                layout.Padding = new Padding(scale(48), scale(7), scale(8), scale(7));
+                layout.ColumnStyles[0].Width = scale(44);
                 layout.GetControlFromPosition(0, 0).MaximumSize = new Size(Math.Max(scale(60), width - layout.Padding.Horizontal), 0);
                 for (int row = 1; row < layout.RowCount; row++)
-                    layout.GetControlFromPosition(1, row).MaximumSize = new Size(Math.Max(scale(60), width - layout.Padding.Horizontal - scale(50)), 0);
+                    layout.GetControlFromPosition(1, row).MaximumSize = new Size(Math.Max(scale(60), width - layout.Padding.Horizontal - scale(44)), 0);
                 layout.PerformLayout();
                 layout.Height = layout.GetPreferredSize(new Size(width, 0)).Height;
                 section.Height = layout.Height;
@@ -947,6 +965,7 @@ namespace TaskbarTemp
             {
                 _disposed = true;
                 _timer?.Stop();
+                SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
 
                 try { _computer?.Close(); } catch { }
 

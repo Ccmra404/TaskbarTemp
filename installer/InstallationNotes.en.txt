@@ -1,0 +1,7 @@
+TaskbarTemp is installed.
+
+The app runs as administrator. CPU temperature readings require compatible hardware and drivers. If no temperature is available, check the PawnIO driver. The installer does not install it; see https://pawnio.eu/.
+
+If you installed to a new folder and want startup enabled, use the app's tray menu to update the startup path.
+
+Installation and uninstallation preserve any existing config.ini. Configuration is not automatically moved between folders.

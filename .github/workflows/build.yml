@@ -17,3 +17,6 @@ jobs:
         run: dotnet restore .\src\TaskbarTemp.csproj
       - name: Build
         run: dotnet build .\src\TaskbarTemp.csproj -c Release --no-restore
+      - name: Test installer startup ownership
+        shell: pwsh
+        run: .\tests\Test-StartupOwnership.ps1

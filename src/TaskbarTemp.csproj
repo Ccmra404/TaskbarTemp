@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>TaskbarTemp</AssemblyName>
+    <RootNamespace>TaskbarTemp</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>1.0.0</Version>
+    <Company>local</Company>
+    <Product>TaskbarTemp</Product>
+    <DebugType>none</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <RestorePackages>false</RestorePackages>
+    <DisableImplicitNuGetFallbackFolder>true</DisableImplicitNuGetFallbackFolder>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="LibreHardwareMonitorLib">
+      <HintPath>..\lib\LibreHardwareMonitorLib.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="HidSharp">
+      <HintPath>..\lib\HidSharp.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="DiskInfoToolkit">
+      <HintPath>..\lib\DiskInfoToolkit.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="RAMSPDToolkit-NDD">
+      <HintPath>..\lib\RAMSPDToolkit-NDD.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="System.IO.Ports">
+      <HintPath>..\lib\System.IO.Ports.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Mono.Posix.NETStandard">
+      <HintPath>..\lib\Mono.Posix.NETStandard.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <PackageReference Include="System.Management" Version="10.0.11" />
+  </ItemGroup>
+
+</Project>

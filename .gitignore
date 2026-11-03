@@ -1,0 +1,18 @@
+# Build output
+**/bin/
+**/obj/
+/publish/
+/artifacts/
+
+# Machine-specific settings and runtime logs
+**/config.ini
+**/*.log
+/README.local.md
+/preview.png
+
+# Editor files and local backups
+.vs/
+*.user
+*.suo
+*.bak
+*.bak-*

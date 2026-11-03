@@ -41,7 +41,7 @@ namespace TaskbarTemp
         private FlowLayoutPanel _detailsContent;
         private Rectangle _detailsScreenArea;
         private Label _cpuName, _cpuTemp, _cpuLoad, _cpuClock;
-        private Label _gpuNameLabel, _gpuTempLabel, _gpuLoadLabel, _vramLabel;
+        private Label _gpuNameLabel, _gpuTempCaption, _gpuTempLabel, _gpuLoadLabel, _vramLabel;
         private Label _memoryLabel, _memoryValue;
         private Label _networkDownSpeed, _networkUpSpeed, _npuName, _npuUsageLabel;
         private readonly HashSet<string> _physicalNetworkNames;
@@ -335,6 +335,7 @@ namespace TaskbarTemp
 
                 _gpuNameLabel = AddSection("GPU", new (string, string)[] { ("温度", ""), ("负载", ""), ("显存", "") }, out var gpuRows);
                 _gpuTempLabel = gpuRows[0]; _gpuLoadLabel = gpuRows[1]; _vramLabel = gpuRows[2];
+                _gpuTempCaption = (Label)((TableLayoutPanel)_gpuNameLabel.Parent).GetControlFromPosition(0, 1);
 
                 _npuName = AddSection("NPU", new (string, string)[] { ("负载", "") }, out var npuRows);
                 _npuUsageLabel = npuRows[0];
@@ -643,7 +644,10 @@ namespace TaskbarTemp
             SetLabelText(_cpuClock, _clock.HasValue ? $"{_clock.Value / 1000f:0.00} GHz" : "—");
 
             SetLabelText(_gpuNameLabel, string.IsNullOrEmpty(_gpuName) ? "GPU" : _gpuName);
-            SetLabelText(_gpuTempLabel, _gpuTemp.HasValue ? $"{_gpuTemp.Value:0.0} °C" : "—");
+            bool showGpuTemp = _gpuTemp.HasValue;
+            _gpuTempCaption.Visible = showGpuTemp;
+            _gpuTempLabel.Visible = showGpuTemp;
+            if (showGpuTemp) SetLabelText(_gpuTempLabel, $"{_gpuTemp.Value:0.0} °C");
             SetLabelText(_gpuLoadLabel, _gpuLoad.HasValue ? $"{_gpuLoad.Value:0.0} %" : "—");
             SetLabelText(_vramLabel, _vramUsed.HasValue && _vramTotal.HasValue
                 ? $"共享 {_vramUsed.Value / 1024f:0.0} / {_vramTotal.Value / 1024f:0.0} GB"

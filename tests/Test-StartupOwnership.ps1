@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $helper = Join-Path $PSScriptRoot '..\installer\ManageStartup.ps1'
+$helperSource = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $helper).Path)
 $program = [IO.File]::ReadAllText((Resolve-Path (Join-Path $PSScriptRoot '..\src\Program.cs')).Path)
 $root = Join-Path ([IO.Path]::GetTempPath()) ('TaskbarTemp-startup-test-' + [guid]::NewGuid().ToString('N'))
 $firstDir = Join-Path $root "first folder's app"
@@ -32,6 +33,8 @@ try {
     Assert ($program.Contains('if ($task -and -not $owned -and -not $samePath)')) 'tray startup rejects an unrelated same-named task'
     Assert ($program.Contains('if ($samePath) { Unregister-ScheduledTask')) 'tray removal only removes the current executable task'
     Assert (!$program.Contains('schtasks.exe"')) 'tray removal does not delete the task unconditionally'
+    $identitySource = '[Security.Principal.WindowsIdentity]::GetCurrent().Name'
+    Assert ($program.Contains($identitySource) -and $helperSource.Contains($identitySource)) 'tray and installer use the same complete account identity'
     if (Test-Path -LiteralPath $root) { throw 'The test directory already exists.' }
     New-Item -ItemType Directory -Path $root | Out-Null
     $createdRoot = $true

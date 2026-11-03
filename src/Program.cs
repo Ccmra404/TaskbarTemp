@@ -1240,7 +1240,7 @@ namespace TaskbarTemp
                     "if ($task -and -not $owned -and -not $samePath) { throw 'A different scheduled task already uses this name.'; };" +
                     "$a = New-ScheduledTaskAction -Execute $env:TT_EXE;" +
                     "$t = New-ScheduledTaskTrigger -AtLogOn;" +
-                    "$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest;" +
+                    "$p = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest;" +
                     "$s = New-ScheduledTaskSettingsSet -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries " +
                     "-ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable;" +
                     "Register-ScheduledTask -TaskName 'TaskbarTemp' -TaskPath '\\' -Action $a -Trigger $t -Principal $p -Settings $s -Description $owner -Force | Out-Null;" +

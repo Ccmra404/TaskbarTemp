@@ -54,6 +54,7 @@ Source: "..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recurse
 
 [InstallDelete]
 Type: files; Name: "{app}\\config.ini"
+Type: files; Name: "{localappdata}\\TaskbarTemp\\run.log"
 
 [Icons]
 Name: "{autoprograms}\TaskbarTemp"; Filename: "{app}\TaskbarTemp.exe"; WorkingDir: "{app}"

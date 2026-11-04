@@ -12,7 +12,7 @@ $createdRoot = $false
 
 function Get-ScheduledTask { [CmdletBinding()] param($TaskName, $TaskPath) return $mockState.Task }
 function New-ScheduledTaskAction { param($Execute) return [pscustomobject]@{ Execute = $Execute } }
-function New-ScheduledTaskTrigger { param([switch]$AtLogOn) return [pscustomobject]@{ AtLogOn = $AtLogOn.IsPresent } }
+function New-ScheduledTaskTrigger { param([switch]$AtLogOn) return [pscustomobject]@{ AtLogOn = $AtLogOn.IsPresent; Delay = '' } }
 function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) return [pscustomobject]@{ RunLevel = $RunLevel } }
 function New-ScheduledTaskSettingsSet {
     param([switch]$DontStopIfGoingOnBatteries, [switch]$AllowStartIfOnBatteries, $ExecutionTimeLimit, [switch]$StartWhenAvailable)
@@ -44,6 +44,7 @@ try {
 
     & $helper -Action Install -ExecutablePath $first
     Assert ($mockState.Task.Actions[0].Execute -ieq $first) 'startup uses the selected path'
+    Assert ($mockState.Task.Trigger.Delay -eq 'PT30S') 'startup waits for hardware sensors to initialize'
     Assert ($mockState.Task.Description -eq 'Ccmra404.TaskbarTemp.Startup.v1') 'startup records its ownership marker'
     Assert ($mockState.Task.Principal.RunLevel -eq 'Highest') 'startup uses highest privileges'
     Assert ($mockState.Task.Settings.BatteryAllowed -and $mockState.Task.Settings.NoBatteryStop) 'battery use is allowed'

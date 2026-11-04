@@ -28,6 +28,7 @@ if ($null -ne $task -and !$isOwned -and !$matchesExecutable) {
 if (-not (Test-Path -LiteralPath $expected -PathType Leaf)) { throw 'TaskbarTemp executable was not found.' }
 $taskAction = New-ScheduledTaskAction -Execute $expected
 $trigger = New-ScheduledTaskTrigger -AtLogOn
+$trigger.Delay = 'PT30S'
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable
 Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Description $owner -Force | Out-Null

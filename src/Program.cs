@@ -1239,7 +1239,7 @@ namespace TaskbarTemp
                     "$owned = $task -and $task.Description -eq $owner;" +
                     "if ($task -and -not $owned -and -not $samePath) { throw 'A different scheduled task already uses this name.'; };" +
                     "$a = New-ScheduledTaskAction -Execute $env:TT_EXE;" +
-                    "$t = New-ScheduledTaskTrigger -AtLogOn;" +
+                    "$t = New-ScheduledTaskTrigger -AtLogOn; $t.Delay = 'PT30S';" +
                     "$p = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest;" +
                     "$s = New-ScheduledTaskSettingsSet -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries " +
                     "-ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable;" +
@@ -1259,7 +1259,7 @@ namespace TaskbarTemp
                 bool ok = outp.Contains("OK");
                 Log("install autostart rc=" + p.ExitCode + " out=" + outp.Trim());
                 MessageBox.Show(ok
-                        ? "已安装开机自启（电池供电也运行，拔电源不停止，无时限）。"
+                        ? "已安装开机自启（登录后约 30 秒启动；电池供电也运行，拔电源不停止，无时限）。"
                         : "安装失败：\n" + outp,
                     "TaskbarTemp", MessageBoxButtons.OK,
                     ok ? MessageBoxIcon.Information : MessageBoxIcon.Error);

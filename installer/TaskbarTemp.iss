@@ -44,13 +44,16 @@ english.StartupFailed=The application was installed, but startup configuration f
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:DesktopIcon}"; Flags: unchecked
-Name: "autostart"; Description: "{cm:Autostart}"; Flags: unchecked
+Name: "autostart"; Description: "{cm:Autostart}"
 
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "config.ini,*.log,*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "ManageStartup.ps1"; DestDir: "{autopf}\TaskbarTemp\Support"; Flags: ignoreversion
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+Type: files; Name: "{app}\\config.ini"
 
 [Icons]
 Name: "{autoprograms}\TaskbarTemp"; Filename: "{app}\TaskbarTemp.exe"; WorkingDir: "{app}"
@@ -61,6 +64,11 @@ Filename: "{app}\TaskbarTemp.exe"; Description: "{cm:Launch}"; Flags: nowait pos
 
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{autopf}\TaskbarTemp\Support\ManageStartup.ps1"" -Action Remove -ExecutablePath ""{app}\TaskbarTemp.exe"""; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "RemoveOwnedTaskbarTempStartup"
+
+[UninstallDelete]
+Type: files; Name: "{app}\config.ini"
+Type: files; Name: "{localappdata}\TaskbarTemp\run.log"
+Type: dirifempty; Name: "{localappdata}\TaskbarTemp"
 
 [Code]
 procedure CurStepChanged(CurStep: TSetupStep);

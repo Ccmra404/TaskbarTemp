@@ -773,9 +773,9 @@ static void UpdateDetails(void)
 static void DrawDetailRow(HDC dc, int y, const wchar_t* title, const wchar_t* value, COLORREF label, COLORREF text)
 {
     SetTextColor(dc, label);
-    TextOutW(dc, 82, y, title, (int)wcslen(title));
+    TextOutW(dc, 75, y, title, (int)wcslen(title));
     SetTextColor(dc, text);
-    TextOutW(dc, 155, y, value, (int)wcslen(value));
+    TextOutW(dc, 140, y, value, (int)wcslen(value));
 }
 
 static void DrawDetailCard(HDC dc, int top, int bottom, const wchar_t* category, const wchar_t* title,
@@ -784,18 +784,18 @@ static void DrawDetailCard(HDC dc, int top, int bottom, const wchar_t* category,
     HBRUSH brush = CreateSolidBrush(fill);
     HPEN pen = CreatePen(PS_SOLID, 1, border);
     HGDIOBJ oldBrush = SelectObject(dc, brush), oldPen = SelectObject(dc, pen);
-    RoundRect(dc, 14, top, 396, bottom, 20, 20);
+    RoundRect(dc, 12, top, 338, bottom, 20, 20);
     SelectObject(dc, oldBrush); SelectObject(dc, oldPen);
     DeleteObject(brush); DeleteObject(pen);
     brush = CreateSolidBrush(tile);
     oldBrush = SelectObject(dc, brush);
     oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-    RoundRect(dc, 25, top + 12, 65, top + 52, 10, 10);
+    RoundRect(dc, 20, top + 10, 60, top + 50, 10, 10);
     SelectObject(dc, oldBrush); SelectObject(dc, oldPen); DeleteObject(brush);
     HPEN iconPen = CreatePen(PS_SOLID, 1, accent);
     oldPen = SelectObject(dc, iconPen);
     oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    int x = 30, y = top + 17;
+    int x = 25, y = top + 15;
     if (wcscmp(category, L"CPU") == 0)
     {
         Rectangle(dc, x + 5, y + 5, x + 17, y + 17);
@@ -828,7 +828,7 @@ static void DrawDetailCard(HDC dc, int top, int bottom, const wchar_t* category,
     SelectObject(dc, oldPen); SelectObject(dc, oldBrush); DeleteObject(iconPen);
     HGDIOBJ oldFont = SelectObject(dc, titleFont);
     SetTextColor(dc, text);
-    RECT titleRect = {82, top + 10, 385, top + 30};
+    RECT titleRect = {75, top + 8, 330, top + 28};
     DrawTextW(dc, title, -1, &titleRect, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     SelectObject(dc, oldFont);
 }
@@ -855,30 +855,30 @@ static void PaintDetails(HWND hwnd, HDC target)
     COLORREF label = high ? GetSysColor(COLOR_GRAYTEXT) : dark ? RGB(181,190,202) : RGB(96,106,119);
     HBRUSH background = CreateSolidBrush(bg); FillRect(dc, &bounds, background); DeleteObject(background);
     SetMapMode(dc, MM_ANISOTROPIC);
-    SetWindowExtEx(dc, 410, 340, NULL); SetViewportExtEx(dc, bounds.right, bounds.bottom, NULL);
+    SetWindowExtEx(dc, 350, 300, NULL); SetViewportExtEx(dc, bounds.right, bounds.bottom, NULL);
     SetBkMode(dc, TRANSPARENT);
     HFONT normal = CreateFontW(-14,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Microsoft YaHei UI");
     HFONT bold = CreateFontW(-15,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Microsoft YaHei UI");
     HGDIOBJ oldFont = SelectObject(dc, normal);
     wchar_t cpu[128] = L"CPU"; DWORD cpuBytes = sizeof(cpu);
     RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", L"ProcessorNameString", RRF_RT_REG_SZ, NULL, cpu, &cpuBytes);
-    DrawDetailCard(dc, 14, 149, L"CPU", cpu, fill, border, tile, accent, text, bold);
-    DrawDetailCard(dc, 157, 257, L"GPU", g_gpuName, fill, border, tile, accent, text, bold);
-    DrawDetailCard(dc, 265, 328, L"RAM", L"物理内存", fill, border, tile, accent, text, bold);
+    DrawDetailCard(dc, 10, 126, L"CPU", cpu, fill, border, tile, accent, text, bold);
+    DrawDetailCard(dc, 132, 218, L"GPU", g_gpuName, fill, border, tile, accent, text, bold);
+    DrawDetailCard(dc, 224, 288, L"RAM", L"物理内存", fill, border, tile, accent, text, bold);
     wchar_t value[100], down[24], up[24];
     if (g_sample.tempValid) swprintf(value, 100, L"%.1f °C", g_sample.tempC); else wcscpy_s(value, 100, L"未读到温度");
-    DrawDetailRow(dc, 47, L"温度", value, label, text);
-    swprintf(value, 100, L"%.0f %%", g_sample.loadPct); DrawDetailRow(dc, 69, L"负载", value, label, text);
+    DrawDetailRow(dc, 39, L"温度", value, label, text);
+    swprintf(value, 100, L"%.0f %%", g_sample.loadPct); DrawDetailRow(dc, 59, L"负载", value, label, text);
     if (g_sample.freqMHz > 0) swprintf(value, 100, L"%.2f GHz", g_sample.freqMHz / 1000.0f); else wcscpy_s(value, 100, L"—");
-    DrawDetailRow(dc, 91, L"频率", value, label, text);
+    DrawDetailRow(dc, 79, L"频率", value, label, text);
     FormatSpeed(g_sample.netDownBps, down, 24); FormatSpeed(g_sample.netUpBps, up, 24);
-    swprintf(value, 100, L"↓ %s   ↑ %s", down, up); DrawDetailRow(dc, 113, L"网速", value, label, text);
+    swprintf(value, 100, L"↓ %s   ↑ %s", down, up); DrawDetailRow(dc, 99, L"网速", value, label, text);
     if (g_gpuLoadValid) swprintf(value, 100, L"%.1f %%", g_gpuLoad); else wcscpy_s(value, 100, L"—");
-    DrawDetailRow(dc, 190, L"负载", value, label, text);
+    DrawDetailRow(dc, 161, L"负载", value, label, text);
     if (g_gpuMemoryValid) swprintf(value, 100, L"共享 %.1f / %.1f GB", g_gpuSharedUsed / 1073741824.0, g_gpuSharedTotal / 1073741824.0); else wcscpy_s(value, 100, L"—");
-    DrawDetailRow(dc, 214, L"显存", value, label, text);
+    DrawDetailRow(dc, 183, L"显存", value, label, text);
     swprintf(value, 100, L"%.1f / %.1f GB", g_sample.memUsedGB, g_sample.memTotalGB);
-    DrawDetailRow(dc, 298, L"用量", value, label, text);
+    DrawDetailRow(dc, 253, L"用量", value, label, text);
     SelectObject(dc, oldFont); DeleteObject(normal); DeleteObject(bold);
     SetMapMode(dc, MM_TEXT);
     BitBlt(target, 0, 0, bounds.right, bounds.bottom, dc, 0, 0, SRCCOPY);
@@ -928,7 +928,7 @@ static void ShowDetails(void)
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
         RegisterClassW(&wc);
         UINT dpi = GetDpiForSystem();
-        RECT frame = {0, 0, MulDiv(410, dpi, 96), MulDiv(340, dpi, 96)};
+        RECT frame = {0, 0, MulDiv(350, dpi, 96), MulDiv(300, dpi, 96)};
         DWORD exStyle = g_preview ? 0 : WS_EX_TOOLWINDOW;
         AdjustWindowRectExForDpi(&frame, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, exStyle, dpi);
         g_hDetails = CreateWindowExW(exStyle, wc.lpszClassName, L"TaskbarTemp 详情",

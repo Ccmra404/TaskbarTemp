@@ -1,19 +1,19 @@
 # TaskbarTemp
 
-Windows 11 taskbar tray monitor for CPU temperature, CPU/GPU load, shared GPU memory, physical memory, network traffic, and Intel NPU usage.
+Windows 11 taskbar tray monitor for CPU temperature, CPU/GPU load, shared GPU memory, physical memory, and network traffic.
 
 ## Features
 
 - Shows the current CPU temperature in the notification area.
 - Hover text and a compact, translucent details window.
-- Reads GPU, memory, network, and NPU counters where the hardware and driver expose them.
+- Reads GPU, memory, and network counters where the hardware and driver expose them.
 - Optional startup task and selectable tray icon styles.
 
-Some readings require administrator privileges. NPU usage stays at 0% while no application is running an NPU workload.
+Some readings require administrator privileges.
 
 ## Build
 
-Requirements: Windows x64 and the .NET 10 SDK. Build-time DLL references are kept in `lib/`; `System.Management` is restored from NuGet.
+Requirements: Windows x64 and the .NET 10 SDK. All DLL references are kept in `lib/`.
 
 ```powershell
 dotnet publish .\src\TaskbarTemp.csproj -c Release -r win-x64 --self-contained false -o .\publish\win-x64

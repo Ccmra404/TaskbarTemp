@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.IO;
 using System.Windows.Forms;
@@ -11,6 +13,21 @@ namespace TaskbarTemp
 
     internal static class IconRenderer
     {
+        // GDI 字体创建相对昂贵，且图标字号只有固定的几档；缓存复用，避免每次刷新都 new/Dispose。
+        // 键数量有界（字体族 × 0.5px 归档字号 × 样式），进程生命周期内不会泄漏增长。
+        private static readonly Dictionary<(string Family, float Size, FontStyle Style), Font> FontCache = new();
+
+        private static Font GetFont(string family, float sizePx, FontStyle style)
+        {
+            sizePx = Math.Max(6f, (float)Math.Round(sizePx * 2) / 2);
+            lock (FontCache)
+            {
+                if (!FontCache.TryGetValue((family, sizePx, style), out var font))
+                    FontCache[(family, sizePx, style)] = font = new Font(family, sizePx, style, GraphicsUnit.Pixel);
+                return font;
+            }
+        }
+
         public static Color Accent(double t)
         {
             if (t < 55) return Color.FromArgb(255, 52, 199, 123);
@@ -23,7 +40,7 @@ namespace TaskbarTemp
 
         public static Icon Render(string text, Color accent, int size, IconStyle style)
         {
-            var bmp = new Bitmap(size, size);
+            using var bmp = new Bitmap(size, size, PixelFormat.Format32bppPArgb);
             using (var g = Graphics.FromImage(bmp))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -56,7 +73,6 @@ namespace TaskbarTemp
             finally
             {
                 DestroyIcon(h);
-                bmp.Dispose();
             }
         }
 
@@ -64,7 +80,7 @@ namespace TaskbarTemp
         private static void DrawNumber(Graphics g, string text, Color accent, int size)
         {
             float fs = text.Length >= 3 ? size * 0.60f : size * 0.78f;
-            using var font = new Font("Segoe UI", fs, FontStyle.Bold, GraphicsUnit.Pixel);
+            var font = GetFont("Segoe UI", fs, FontStyle.Bold);
             var sz = g.MeasureString(text, font);
             float x = (size - sz.Width) / 2f;
             float y = (size - sz.Height) / 2f - size * 0.06f;
@@ -106,7 +122,7 @@ namespace TaskbarTemp
 
             float numFs = text.Length >= 3 ? size * (size <= 16 ? 0.54f : 0.60f) : size * (size <= 16 ? 0.76f : 0.80f);
 
-            using var numFont = new Font("Segoe UI Variable Small Semibold", numFs, FontStyle.Regular, GraphicsUnit.Pixel);
+            var numFont = GetFont("Segoe UI Variable Small Semibold", numFs, FontStyle.Regular);
             var nsz = g.MeasureString(text, numFont);
 
             float numX = (size - nsz.Width) / 2f;
@@ -143,7 +159,7 @@ namespace TaskbarTemp
                 g.FillPath(br, path);
 
             float fs = text.Length >= 3 ? size * 0.40f : size * 0.50f;
-            using var font = new Font("Segoe UI", fs, FontStyle.Bold, GraphicsUnit.Pixel);
+            var font = GetFont("Segoe UI", fs, FontStyle.Bold);
             var sz = g.MeasureString(text, font);
             using var white = new SolidBrush(Color.White);
             g.DrawString(text, font, white, (size - sz.Width) / 2f, (size - sz.Height) / 2f - size * 0.03f);
@@ -160,7 +176,7 @@ namespace TaskbarTemp
                 g.DrawPath(pen, path);
 
             float fs = text.Length >= 3 ? size * 0.40f : size * 0.50f;
-            using var font = new Font("Segoe UI", fs, FontStyle.Bold, GraphicsUnit.Pixel);
+            var font = GetFont("Segoe UI", fs, FontStyle.Bold);
             var sz = g.MeasureString(text, font);
             using var white = new SolidBrush(Color.White);
             g.DrawString(text, font, white, (size - sz.Width) / 2f, (size - sz.Height) / 2f - size * 0.03f);

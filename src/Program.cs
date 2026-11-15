@@ -3,7 +3,8 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
-using System.Management;
+using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Win32;
 using System.Windows.Forms;
@@ -16,9 +17,15 @@ namespace TaskbarTemp
         [STAThread]
         private static void Main()
         {
+            // 崩溃诊断：任何未处理异常都写入 run.log，避免进程"无声消失"无从排查。
+            Application.ThreadException += (s, e) => CrashLog("UI thread exception: " + e.Exception);
+            AppDomain.CurrentDomain.UnhandledException += (s, e) => CrashLog("unhandled exception: " + e.ExceptionObject);
+            AppDomain.CurrentDomain.ProcessExit += (s, e) => CrashLog("process exit event (AppDomain unloading)");
+
             using var mutex = new Mutex(true, @"Global\TaskbarTemp_SingleInstance", out bool isNew);
             if (!isNew)
             {
+                CrashLog("second instance blocked: another instance holds the singleton mutex");
                 MessageBox.Show("TaskbarTemp 已在运行（看任务栏托盘）。", "TaskbarTemp",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
@@ -26,10 +33,86 @@ namespace TaskbarTemp
 
             Settings.EnsureDefault();
             ApplicationConfiguration.Initialize();
+            CrashLog(StartContext());
             var context = new TrayContext();
             Application.Run(context);
+            CrashLog("Application.Run returned (message loop ended)");
             if (!context.WaitForShutdown(TimeSpan.FromSeconds(5)))
                 context.Log("shutdown timed out; process is leaving without waiting for the blocked sampler");
+        }
+
+        private static string StartContext()
+        {
+            try
+            {
+                var self = System.Diagnostics.Process.GetCurrentProcess();
+                string parent = "unknown";
+                try
+                {
+                    int ppid = ParentPid();
+                    if (ppid > 0)
+                    {
+                        string pname;
+                        try { pname = System.Diagnostics.Process.GetProcessById(ppid).ProcessName; }
+                        catch { pname = "gone"; }
+                        parent = pname + "(" + ppid + ")";
+                    }
+                }
+                catch { }
+
+                bool elevated = false;
+                try
+                {
+                    using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+                    elevated = new System.Security.Principal.WindowsPrincipal(id)
+                        .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+                }
+                catch { }
+
+                return $"process start: pid={self.Id} parent={parent} session={self.SessionId} elevated={elevated}";
+            }
+            catch (Exception ex) { return "process start (context failed: " + ex.Message + ")"; }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ProcessBasicInformation
+        {
+            public IntPtr ExitStatus;
+            public IntPtr PebBaseAddress;
+            public IntPtr AffinityMask;
+            public IntPtr BasePriority;
+            public IntPtr UniqueProcessId;
+            public IntPtr InheritedFromUniqueProcessId;
+        }
+
+        [DllImport("ntdll.dll")]
+        private static extern int NtQueryInformationProcess(IntPtr handle, int infoClass,
+            ref ProcessBasicInformation info, int infoLength, out int returnLength);
+
+        private static int ParentPid()
+        {
+            try
+            {
+                var info = new ProcessBasicInformation();
+                int status = NtQueryInformationProcess(System.Diagnostics.Process.GetCurrentProcess().Handle,
+                    0, ref info, Marshal.SizeOf<ProcessBasicInformation>(), out _);
+                return status == 0 ? info.InheritedFromUniqueProcessId.ToInt32() : 0;
+            }
+            catch { return 0; }
+        }
+
+        private static void CrashLog(string m)
+        {
+            try
+            {
+                string logPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "TaskbarTemp", "run.log");
+                Directory.CreateDirectory(Path.GetDirectoryName(logPath));
+                File.AppendAllText(logPath,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + m + Environment.NewLine);
+            }
+            catch { }
         }
     }
 
@@ -124,23 +207,26 @@ namespace TaskbarTemp
 
         private readonly NotifyIcon _tray;
         private readonly System.Windows.Forms.Timer _timer;
-        private readonly System.Windows.Forms.Timer _npuTimer;
+        private readonly System.Windows.Forms.Timer _beatTimer;
         private readonly Computer _computer;
         private readonly Control _dispatcher = new Control();
         private readonly object _sampleLock = new();
-        private readonly object _npuLock = new();
         private readonly object _logLock = new();
         private readonly TaskCompletionSource<bool> _shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly ContextMenuStrip _menu;
         private readonly string _logPath;
+        private readonly string _beatPath;
+        private readonly DateTime _startedAt = DateTime.Now;
         private readonly IconStyle _style;
+        private int _beatCount;
+        private float? _displayTemp;
         private Form _details;
         private FlowLayoutPanel _detailsContent;
         private Rectangle _detailsScreenArea;
         private Label _cpuName, _cpuTemp, _cpuLoad, _cpuClock;
         private Label _gpuNameLabel, _gpuTempCaption, _gpuTempLabel, _gpuLoadLabel, _vramLabel;
         private Label _memoryLabel, _memoryValue;
-        private Label _networkDownSpeed, _networkUpSpeed, _npuName, _npuUsageLabel;
+        private Label _networkSpeed;
         private bool _systemBackdropApplied;
         private bool _detailsDarkMode, _detailsHighContrast;
         private int _detailsCardFillArgb, _detailsCardBorderArgb;
@@ -151,27 +237,24 @@ namespace TaskbarTemp
         private readonly HashSet<string> _hardwareFailures = new(StringComparer.OrdinalIgnoreCase);
 
         private const int RefreshIntervalMs = 2000;
-        private const int NpuSampleIntervalMs = 6000;
         private const long MaxLogBytes = 1024 * 1024;
 
         private Icon _currentIcon;
         private string _lastKey = "";
         private string _lastTip = "";
         private bool _loggedFirstRead;
-        private bool _loggedNetworkRead, _loggedNpuRead;
-        private bool _loggedNpuProbe;
+        private bool _loggedNetworkRead;
         private volatile bool _exiting;
         private volatile bool _disposed;
         private bool _sampleRunning, _samplePending;
         private bool _computerOpenAttempted, _shutdownStarted, _networkNamesLoaded;
-        private int _npuVisible, _npuGeneration, _npuWorkerRunning;
 
         private float? _temp;
         private float? _load;
         private float? _clock;
         private string _hwName = "";
         private readonly int _iconSize;
-        private readonly float[] _tempSamples = new float[5];
+        private readonly float[] _tempSamples = new float[3];
         private int _tempSampleCount;
         private int _tempSampleIndex;
 
@@ -182,7 +265,7 @@ namespace TaskbarTemp
         private string _gpuName = "";
         private float? _memUsedGb;
         private float? _memTotalGb;
-        private float? _networkDownloadBps, _networkUploadBps, _npuUsage;
+        private float? _networkDownloadBps, _networkUploadBps;
 
         public TrayContext()
         {
@@ -192,9 +275,19 @@ namespace TaskbarTemp
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "TaskbarTemp", "run.log");
             try { Directory.CreateDirectory(Path.GetDirectoryName(_logPath)); } catch { }
+            _beatPath = Path.Combine(Path.GetDirectoryName(_logPath), "heartbeat.txt");
             try { SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged; }
             catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException || ex is InvalidOperationException)
             { Log("Theme change notifications unavailable: " + ex.Message); }
+
+            // 生命周期诊断：把关机会话、电源状态、锁屏切换都记下来，用于定位"自己消失"。
+            try
+            {
+                SystemEvents.SessionEnding += OnSessionEnding;
+                SystemEvents.PowerModeChanged += OnPowerModeChanged;
+                SystemEvents.SessionSwitch += OnSessionSwitch;
+            }
+            catch (Exception ex) { Log("session event hooks unavailable: " + ex.Message); }
 
             _computer = new Computer
             {
@@ -234,11 +327,22 @@ namespace TaskbarTemp
             _timer.Tick += (s, e) => RequestSample();
             _timer.Start();
 
-            _npuTimer = new System.Windows.Forms.Timer { Interval = NpuSampleIntervalMs };
-            _npuTimer.Tick += (s, e) => RequestNpuSample();
+            // 每 30 秒刷新心跳文件：进程一旦消失，文件时间戳就是死亡时刻。
+            _beatTimer = new System.Windows.Forms.Timer { Interval = 30000 };
+            _beatTimer.Tick += (s, e) => WriteHeartbeat();
+            _beatTimer.Start();
 
             RequestSample();
             Log($"started (style={_style})");
+            WriteHeartbeat();
+
+            // 验收辅助：设置 TASKBARTEMP_PREVIEW=1 时启动后自动打开详情窗，便于无人值守截图核对布局。
+            if (Environment.GetEnvironmentVariable("TASKBARTEMP_PREVIEW") == "1")
+            {
+                var preview = new System.Windows.Forms.Timer { Interval = 1500 };
+                preview.Tick += (s, e) => { preview.Stop(); preview.Dispose(); ShowDetails(); };
+                preview.Start();
+            }
         }
 
         private void RequestSample()
@@ -254,82 +358,6 @@ namespace TaskbarTemp
                 _sampleRunning = true;
                 StartSampleWorker();
             }
-        }
-
-        private void RequestNpuSample()
-        {
-            int generation;
-            lock (_npuLock)
-            {
-                if (_exiting || _disposed || _npuVisible == 0 || _npuWorkerRunning != 0) return;
-                _npuWorkerRunning = 1;
-                generation = _npuGeneration;
-            }
-
-            StartNpuWorker(generation);
-        }
-
-        private void StartNpuWorker(int generation)
-        {
-            try
-            {
-                _ = Task.Factory.StartNew<float?>(() =>
-                {
-                    lock (_npuLock)
-                        if (_exiting || _disposed || _npuVisible == 0 || generation != _npuGeneration) return null;
-                    return ReadNpuUsage();
-                }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)
-                    .ContinueWith(worker => CompleteNpuSample(worker, generation), TaskScheduler.Default);
-            }
-            catch (Exception ex)
-            {
-                int retryGeneration = 0;
-                bool retry = false;
-                lock (_npuLock)
-                {
-                    _npuWorkerRunning = 0;
-                    if (!_exiting && !_disposed && _npuVisible != 0 && generation != _npuGeneration)
-                    {
-                        _npuWorkerRunning = 1;
-                        retryGeneration = _npuGeneration;
-                        retry = true;
-                    }
-                }
-                Log("NPU sampling worker failed: " + ex.Message);
-                if (retry) StartNpuWorker(retryGeneration);
-            }
-        }
-
-        private void CompleteNpuSample(Task<float?> worker, int generation)
-        {
-            if (worker.Exception is Exception ex)
-                Log("NPU sampling worker failed: " + ex.GetBaseException().Message);
-
-            bool applySample;
-            bool startFollowUp = false;
-            int followUpGeneration = 0;
-            lock (_npuLock)
-            {
-                _npuWorkerRunning = 0;
-                int currentGeneration = _npuGeneration;
-                bool visible = _npuVisible != 0;
-                applySample = worker.Exception == null && !_exiting && !_disposed && visible &&
-                              generation == currentGeneration;
-
-                if (!_exiting && !_disposed && visible && generation != currentGeneration)
-                {
-                    _npuWorkerRunning = 1;
-                    followUpGeneration = currentGeneration;
-                    startFollowUp = true;
-                }
-            }
-
-            if (applySample)
-            {
-                try { _dispatcher.BeginInvoke((Action)(() => ApplyNpuSample(worker.Result, generation))); }
-                catch (InvalidOperationException) { }
-            }
-            if (startFollowUp) StartNpuWorker(followUpGeneration);
         }
 
         private void StartSampleWorker()
@@ -544,7 +572,8 @@ namespace TaskbarTemp
                 if (snapshot.Temp.HasValue)
                 {
                     float disp = FilterTemperature(snapshot.Temp.Value);
-                    if (_tempSampleCount == _tempSamples.Length && Math.Abs(disp - snapshot.Temp.Value) > 12f)
+                    _displayTemp = disp;
+                    if (_tempSampleCount == _tempSamples.Length && Math.Abs(disp - snapshot.Temp.Value) > 8f)
                         Log($"spike filtered: raw={snapshot.Temp.Value:0.0} -> shown={disp:0.0}");
                     string text = Math.Round(disp).ToString("0");
                     var accent = IconRenderer.ColorFor(disp);
@@ -560,24 +589,6 @@ namespace TaskbarTemp
                 {
                     ReplaceTrayIcon("--", IconRenderer.ColorFor(null), "nodata");
                     SetTip("CPU 温度：未读到，请检查驱动和管理员权限");
-                }
-                if (_details != null && !_details.IsDisposed && _details.Visible) UpdateDetails();
-            }
-            catch (Exception ex) { Log("refresh error: " + ex.Message); }
-        }
-
-        private void ApplyNpuSample(float? usage, int generation)
-        {
-            try
-            {
-                if (_exiting || _disposed || Volatile.Read(ref _npuVisible) == 0 ||
-                    generation != Volatile.Read(ref _npuGeneration)) return;
-
-                _npuUsage = usage;
-                if (!_loggedNpuRead && usage.HasValue)
-                {
-                    _loggedNpuRead = true;
-                    Log($"NPU counter OK: {usage.Value:0.0}%");
                 }
                 if (_details != null && !_details.IsDisposed && _details.Visible) UpdateDetails();
             }
@@ -628,9 +639,6 @@ namespace TaskbarTemp
                 _gpuTempCaption = (Label)((TableLayoutPanel)_gpuNameLabel.Parent).GetControlFromPosition(0, 1);
                 _gpuTempRowVisible = null;
 
-                _npuName = AddSection("NPU", new (string, string)[] { ("负载", "") }, out var npuRows);
-                _npuUsageLabel = npuRows[0];
-
                 _memoryLabel = AddSection("RAM", new (string, string)[] { ("用量", "") }, out var memoryRows);
                 _memoryValue = memoryRows[0];
                 _details.Controls.Add(_detailsContent);
@@ -642,23 +650,7 @@ namespace TaskbarTemp
                     PositionDetails(workingArea);
                 };
                 _details.FormClosing += (s, e) => { if (!_exiting) { e.Cancel = true; _details.Hide(); } };
-                _details.VisibleChanged += (s, e) =>
-                {
-                    bool visible = _details.Visible;
-                    lock (_npuLock)
-                    {
-                        Volatile.Write(ref _npuVisible, visible ? 1 : 0);
-                        Interlocked.Increment(ref _npuGeneration);
-                    }
-                    if (visible)
-                    {
-                        _npuUsage = null;
-                        UpdateDetails();
-                        _npuTimer.Start();
-                        RequestNpuSample();
-                    }
-                    else _npuTimer.Stop();
-                };
+                _details.VisibleChanged += (s, e) => { if (_details.Visible) UpdateDetails(); };
             }
 
             UpdateDetails();
@@ -803,107 +795,33 @@ namespace TaskbarTemp
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, uint size);
         private HashSet<string> ReadPhysicalNetworkNames()
         {
+            // 纯 .NET 枚举替代 WMI Win32_NetworkAdapter：避免加载 WMI/COM 基础设施。
+            // .NET 10 的 GetAllNetworkInterfaces 会把 WAN Miniport、内核调试网卡、
+            // Wi-Fi Direct 虚拟适配器和 NDIS 过滤器伪接口（名字形如 "WLAN-QoS Packet Scheduler-0000"）
+            // 一并返回；后者与基础适配器上报相同流量，不去掉会导致网速重复计数。
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                using var searcher = new ManagementObjectSearcher("SELECT NetConnectionID, PhysicalAdapter FROM Win32_NetworkAdapter");
-                using var adapters = searcher.Get();
-                foreach (ManagementObject adapter in adapters)
-                using (adapter)
-                    if (adapter["PhysicalAdapter"] is bool physical && physical &&
-                        adapter["NetConnectionID"] is string name && !string.IsNullOrWhiteSpace(name)) names.Add(name);
+                foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (nic.NetworkInterfaceType != NetworkInterfaceType.Ethernet &&
+                        nic.NetworkInterfaceType != NetworkInterfaceType.Wireless80211)
+                        continue;
+                    string description = nic.Description ?? "";
+                    if (description.IndexOf("WAN Miniport", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        description.IndexOf("Kernel Debug", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        description.IndexOf("Wi-Fi Direct", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        description.IndexOf("Virtual Adapter", StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
+                    string name = nic.Name ?? "";
+                    // 过滤器伪接口名字固定以 "-NNNN" 结尾（基础适配器连接名不含该模式）
+                    if (name.Length >= 5 && name[name.Length - 5] == '-' && char.IsDigit(name[name.Length - 1]))
+                        continue;
+                    if (!string.IsNullOrWhiteSpace(name)) names.Add(name);
+                }
             }
             catch (Exception ex) { Log("physical network lookup failed: " + ex.Message); }
             return names;
-        }
-
-        private float? ReadNpuUsage()
-        {
-            try
-            {
-                var neuralByAdapter = new Dictionary<string, Dictionary<string, float>>(StringComparer.OrdinalIgnoreCase);
-                var has3D = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-                using var searcher = new ManagementObjectSearcher("root\\CIMV2",
-                    "SELECT Name, UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE Name LIKE '%engtype_Neural%' OR Name LIKE '%engtype_3D%'",
-                    // shortcut: Timeout bounds collection enumeration, not a blocked Get(); revisit if Get() must be cancellable.
-                    new System.Management.EnumerationOptions { Timeout = TimeSpan.FromSeconds(5) });
-                using var instances = searcher.Get();
-
-                foreach (ManagementObject instance in instances)
-                using (instance)
-                {
-                    string name = instance["Name"] as string ?? "";
-                    int luidStart = name.IndexOf("luid_", StringComparison.OrdinalIgnoreCase);
-                    if (luidStart < 0) continue;
-
-                    int physStart = name.IndexOf("_phys_", luidStart, StringComparison.OrdinalIgnoreCase);
-                    if (physStart < 0) continue;
-
-                    string luid = name.Substring(luidStart + 5, physStart - luidStart - 5);
-                    if (name.Contains("_engtype_3D", StringComparison.OrdinalIgnoreCase))
-                    {
-                        has3D.Add(luid);
-                        continue;
-                    }
-
-                    if (!name.Contains("_engtype_Neural", StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    int engineEnd = name.IndexOf("_engtype_", physStart, StringComparison.OrdinalIgnoreCase);
-                    if (engineEnd < 0) continue;
-
-                    string engine = name.Substring(physStart, engineEnd - physStart);
-                    float usage = instance["UtilizationPercentage"] == null
-                        ? 0f
-                        : Convert.ToSingle(instance["UtilizationPercentage"]);
-
-                    if (!neuralByAdapter.TryGetValue(luid, out var engines))
-                    {
-                        engines = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
-                        neuralByAdapter[luid] = engines;
-                    }
-
-                    engines.TryGetValue(engine, out float current);
-                    engines[engine] = current + usage;
-                }
-
-                string candidate = null;
-                int candidateCount = 0;
-                foreach (var adapter in neuralByAdapter)
-                {
-                    if (has3D.Contains(adapter.Key)) continue;
-                    candidate = adapter.Key;
-                    candidateCount++;
-                }
-
-                if (candidateCount != 1)
-                {
-                    if (!_loggedNpuProbe)
-                    {
-                        _loggedNpuProbe = true;
-                        Log($"NPU counter unavailable: Neural adapters={neuralByAdapter.Count}, candidates={candidateCount}");
-                    }
-                    return null;
-                }
-
-                // shortcut: treats the sole Neural-only adapter as the NPU; add PnP-to-LUID mapping if multiple match.
-                _loggedNpuProbe = true;
-                float maxUsage = 0f;
-                foreach (float usage in neuralByAdapter[candidate].Values)
-                    if (usage > maxUsage) maxUsage = usage;
-
-                return Math.Clamp(maxUsage, 0f, 100f);
-            }
-            catch (Exception ex)
-            {
-                if (!_loggedNpuProbe)
-                {
-                    _loggedNpuProbe = true;
-                    Log("NPU counter failed: " + ex.Message);
-                }
-                return null;
-            }
         }
 
         private float FilterTemperature(float value)
@@ -913,8 +831,7 @@ namespace TaskbarTemp
             if (_tempSampleCount < _tempSamples.Length)
                 _tempSampleCount++;
 
-            Span<float> sorted = stackalloc float[5];
-            for (int i = 0; i < _tempSampleCount; i++)
+            Span<float> sorted = stackalloc float[5];            for (int i = 0; i < _tempSampleCount; i++)
                 sorted[i] = _tempSamples[i];
 
             for (int i = 1; i < _tempSampleCount; i++)
@@ -1002,16 +919,6 @@ namespace TaskbarTemp
                     graphics.DrawLine(pen, x + u(23), y + u(12), x + u(26), y + u(12));
                     graphics.DrawLine(pen, x + u(23), y + u(16), x + u(26), y + u(16));
                     break;
-                case "NPU":
-                    graphics.DrawLine(pen, x + u(9), y + u(17), x + u(15), y + u(10));
-                    graphics.DrawLine(pen, x + u(15), y + u(10), x + u(22), y + u(17));
-                    graphics.DrawLine(pen, x + u(9), y + u(17), x + u(17), y + u(23));
-                    graphics.DrawLine(pen, x + u(22), y + u(17), x + u(17), y + u(23));
-                    graphics.DrawEllipse(pen, x + u(6), y + u(14), u(6), u(6));
-                    graphics.DrawEllipse(pen, x + u(12), y + u(7), u(6), u(6));
-                    graphics.DrawEllipse(pen, x + u(19), y + u(14), u(6), u(6));
-                    graphics.DrawEllipse(pen, x + u(14), y + u(20), u(6), u(6));
-                    break;
                 case "RAM":
                     graphics.DrawRectangle(pen, x + u(5), y + u(10), u(20), u(10));
                     for (int i = 0; i < 4; i++)
@@ -1095,12 +1002,16 @@ namespace TaskbarTemp
                 int row = rows.Length + 1;
                 layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
                 layout.Controls.Add(new Label { Text = "网速", AutoSize = true, Anchor = AnchorStyles.Left, Tag = "caption", Margin = new Padding(3, 2, 6, 2) }, 0, row);
-                var speeds = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty, Dock = DockStyle.Fill };
-                _networkDownSpeed = new Label { AutoSize = true, Margin = Padding.Empty };
-                _networkUpSpeed = new Label { AutoSize = true, Margin = new Padding(4, 0, 0, 0) };
-                speeds.Controls.Add(_networkDownSpeed);
-                speeds.Controls.Add(_networkUpSpeed);
-                layout.Controls.Add(speeds, 1, row);
+                // 单个 Label 而不是 FlowLayoutPanel：与其它值行同构，行高计算才稳定
+                _networkSpeed = new Label
+                {
+                    Text = "—",
+                    AutoSize = true,
+                    MaximumSize = new Size(285, 0),
+                    Anchor = AnchorStyles.Left,
+                    Margin = new Padding(3, 2, 3, 2)
+                };
+                layout.Controls.Add(_networkSpeed, 1, row);
             }
 
             section.Controls.Add(layout);
@@ -1127,6 +1038,13 @@ namespace TaskbarTemp
             {
                 _gpuTempCaption.Visible = showGpuTemp;
                 _gpuTempLabel.Visible = showGpuTemp;
+                // layout.AutoSize=false 时隐藏控件不会自动塌缩行高，必须显式把该行压成 0
+                if (_gpuTempCaption.Parent is TableLayoutPanel gpuLayout && gpuLayout.RowStyles.Count > 1)
+                {
+                    var tempRow = gpuLayout.RowStyles[1];
+                    tempRow.SizeType = showGpuTemp ? SizeType.AutoSize : SizeType.Absolute;
+                    tempRow.Height = 0;
+                }
                 _gpuTempRowVisible = showGpuTemp;
                 layoutChanged = true;
             }
@@ -1141,11 +1059,9 @@ namespace TaskbarTemp
                 ? $"{_memUsedGb.Value:0.0} / {_memTotalGb.Value:0.0} GB"
                 : "—");
 
-            layoutChanged |= SetLabelText(_networkDownSpeed, "↓" + FormatNetworkSpeed(_networkDownloadBps));
-            layoutChanged |= SetLabelText(_networkUpSpeed, "↑" + FormatNetworkSpeed(_networkUploadBps));
+            layoutChanged |= SetLabelText(_networkSpeed,
+                "↓" + FormatNetworkSpeed(_networkDownloadBps) + "  ↑" + FormatNetworkSpeed(_networkUploadBps));
 
-            layoutChanged |= SetLabelText(_npuName, "NPU");
-            layoutChanged |= SetLabelText(_npuUsageLabel, _npuUsage.HasValue ? $"{_npuUsage.Value:0.0} %" : "—");
             if (layoutChanged) LayoutDetails();
         }
 
@@ -1296,10 +1212,34 @@ namespace TaskbarTemp
 
         private void ExitApp()
         {
-            Log("exit");
+            Log("exit requested from tray menu");
             Dispose();
             ExitThread();
         }
+
+        private void WriteHeartbeat()
+        {
+            try
+            {
+                _beatCount++;
+                int minutes = (int)(DateTime.Now - _startedAt).TotalMinutes;
+                string temp = _displayTemp.HasValue ? _displayTemp.Value.ToString("0.0") : "-";
+                File.WriteAllText(_beatPath,
+                    $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  uptime={minutes}m  temp={temp}  pid={Environment.ProcessId}");
+                if (_beatCount % 10 == 0)
+                    Log($"alive {minutes}m temp={temp}");
+            }
+            catch { }
+        }
+
+        private void OnSessionEnding(object sender, SessionEndingEventArgs e)
+            => Log("session ending: reason=" + e.Reason);
+
+        private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+            => Log("power mode changed: " + e.Mode);
+
+        private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+            => Log("session switch: " + e.Reason);
 
         internal void Log(string m)
         {
@@ -1351,8 +1291,11 @@ namespace TaskbarTemp
                     }
                 }
                 _timer?.Stop();
-                _npuTimer?.Stop();
+                _beatTimer?.Stop();
                 SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+                SystemEvents.SessionEnding -= OnSessionEnding;
+                SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+                SystemEvents.SessionSwitch -= OnSessionSwitch;
 
                 if (closeComputer)
                     _ = Task.Run(() =>
@@ -1374,7 +1317,7 @@ namespace TaskbarTemp
                 _menu?.Dispose();
                 _tray?.Dispose();
                 _timer?.Dispose();
-                _npuTimer?.Dispose();
+                _beatTimer?.Dispose();
                 _dispatcher.Dispose();
             }
 

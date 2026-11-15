@@ -11,7 +11,7 @@
     <AssemblyName>TaskbarTemp</AssemblyName>
     <RootNamespace>TaskbarTemp</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.0.0</Version>
+    <Version>1.2.0</Version>
     <Company>local</Company>
     <Product>TaskbarTemp</Product>
     <DebugType>none</DebugType>
@@ -20,6 +20,15 @@
     <DisableImplicitNuGetFallbackFolder>true</DisableImplicitNuGetFallbackFolder>
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- 运行时瘦身：关闭并发 GC（托盘常驻小程序无需后台 GC 线程）、
+         关闭 ICU 全球化数据（约 30MB 映射文件；本程序只用 Ordinal 比较与固定格式化）、
+         关闭热更新元数据支持 -->
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+    <!-- 预编译 + 关闭分层编译：减少 JIT 代码堆与启动开销（实测工作集 -2.4MB、线程 -1） -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <TieredCompilation>false</TieredCompilation>
   </PropertyGroup>
 
   <ItemGroup>
@@ -47,7 +56,6 @@
       <HintPath>..\lib\Mono.Posix.NETStandard.dll</HintPath>
       <Private>true</Private>
     </Reference>
-    <PackageReference Include="System.Management" Version="10.0.11" />
   </ItemGroup>
 
 </Project>

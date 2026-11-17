@@ -25,6 +25,7 @@
 #include <dxgi1_2.h>
 #include <d3dkmthk.h>
 #include <dwmapi.h>
+#include <taskschd.h>
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -46,6 +47,9 @@ using namespace Gdiplus::DllExports;
 #pragma comment(lib, "cfgmgr32.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "taskschd.lib")
 
 // ---------- 常量 ----------
 #define WM_TRAYICON     (WM_APP + 1)
@@ -74,6 +78,7 @@ static BOOL   g_preview;
 static BOOL   g_previewDark;
 static HICON  g_hIcon;
 static HMENU  g_hMenu;
+static HMENU  g_styleMenu;
 static NOTIFYICONDATAW g_nid;
 static UINT g_taskbarCreated;
 static BOOL g_trayRegistered;
@@ -82,6 +87,9 @@ static UINT64 g_lastIconColor = 0;
 enum IconStyle { ICON_MONO, ICON_NUMBER, ICON_PILL, ICON_RING };
 static IconStyle g_iconStyle = ICON_MONO;
 static wchar_t g_configPath[MAX_PATH];
+
+enum StartupStatus { STARTUP_UNKNOWN, STARTUP_ABSENT, STARTUP_ENABLED, STARTUP_DISABLED, STARTUP_CONFLICT };
+static StartupStatus g_startupStatus = STARTUP_UNKNOWN;
 
 static COLORREF TempColor(double t)
 {
@@ -120,6 +128,69 @@ static void LoadIconStyle(void)
         break;
     }
     fclose(file);
+}
+
+static BOOL SaveIconStyle(IconStyle style)
+{
+    if (!g_configPath[0] || style < ICON_MONO || style > ICON_RING) return FALSE;
+    static const wchar_t* names[] = {L"mono", L"number", L"pill", L"ring"};
+    FILE* input = NULL;
+    DWORD attrs = GetFileAttributesW(g_configPath);
+    if (attrs == INVALID_FILE_ATTRIBUTES && GetLastError() != ERROR_FILE_NOT_FOUND) return FALSE;
+    if (attrs != INVALID_FILE_ATTRIBUTES && _wfopen_s(&input, g_configPath, L"rt, ccs=UTF-8") != 0) return FALSE;
+
+    wchar_t directory[MAX_PATH], temporary[MAX_PATH];
+    wcscpy_s(directory, MAX_PATH, g_configPath);
+    wchar_t* slash = wcsrchr(directory, L'\\');
+    if (!slash) { if (input) fclose(input); return FALSE; }
+    slash[1] = 0;
+    if (!GetTempFileNameW(directory, L"ttc", 0, temporary)) { if (input) fclose(input); return FALSE; }
+    FILE* output = NULL;
+    if (_wfopen_s(&output, temporary, L"wt, ccs=UTF-8") != 0)
+    { if (input) fclose(input); DeleteFileW(temporary); return FALSE; }
+
+    BOOL replaced = FALSE, atLineStart = TRUE, skipLine = FALSE, okay = TRUE, endsWithNewline = TRUE;
+    wchar_t line[4096];
+    while (input && fgetws(line, 4096, input))
+    {
+        if (atLineStart)
+        {
+            wchar_t* key = line;
+            while (*key == L' ' || *key == L'\t') key++;
+            if (_wcsnicmp(key, L"style", 5) == 0)
+            {
+                key += 5;
+                while (*key == L' ' || *key == L'\t') key++;
+                if (*key == L'=')
+                {
+                    skipLine = TRUE;
+                    if (!replaced && fwprintf(output, L"style = %s\n", names[style]) < 0) okay = FALSE;
+                    replaced = TRUE;
+                }
+            }
+        }
+        size_t length = wcslen(line);
+        BOOL newline = length && line[length - 1] == L'\n';
+        if (!skipLine)
+        {
+            if (fputws(line, output) < 0) okay = FALSE;
+            endsWithNewline = newline;
+        }
+        else if (replaced) endsWithNewline = TRUE;
+        atLineStart = newline;
+        if (newline) skipLine = FALSE;
+    }
+    if (input && ferror(input)) okay = FALSE;
+    if (!replaced)
+    {
+        if (!endsWithNewline && fputws(L"\n", output) < 0) okay = FALSE;
+        if (fwprintf(output, L"style = %s\n", names[style]) < 0) okay = FALSE;
+    }
+    if (input) fclose(input);
+    if (fclose(output) != 0) okay = FALSE;
+    if (okay && MoveFileExW(temporary, g_configPath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return TRUE;
+    DeleteFileW(temporary);
+    return FALSE;
 }
 
 // PawnIO
@@ -937,8 +1008,11 @@ static void ApplyDetailsTitleTheme(HWND hwnd)
     DwmSetWindowAttribute(hwnd, 36, &titleText, sizeof(titleText));
 }
 
+static void ShowTrayMenu(HWND owner);
+
 static LRESULT CALLBACK DetailsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    if (g_preview && msg == WM_CONTEXTMENU) { ShowTrayMenu(g_hWnd); return 0; }
     if (msg == WM_PAINT) { PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps); PaintDetails(hwnd, dc); EndPaint(hwnd, &ps); return 0; }
     if (msg == WM_ERASEBKGND) return 1;
     if (msg == WM_SETTINGCHANGE || msg == WM_THEMECHANGED) { ApplyDetailsTitleTheme(hwnd); InvalidateRect(hwnd, NULL, FALSE); }
@@ -1010,23 +1084,87 @@ static void CopyTemperature(void)
     CloseClipboard();
 }
 
-static void OpenIconSettings(void)
+static StartupStatus QueryStartupStatus(const wchar_t* executable = NULL)
 {
-    if (!g_configPath[0]) return;
-    if (GetFileAttributesW(g_configPath) == INVALID_FILE_ATTRIBUTES)
+    StartupStatus result = STARTUP_UNKNOWN;
+    HRESULT initialized = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) return result;
+    ITaskService* service = NULL; ITaskFolder* folder = NULL; IRegisteredTask* task = NULL;
+    ITaskDefinition* definition = NULL; IActionCollection* actions = NULL;
+    IAction* action = NULL; IExecAction* exec = NULL;
+    BSTR root = SysAllocString(L"\\"), name = SysAllocString(L"TaskbarTemp"), path = NULL;
+    VARIANT empty = {}; VARIANT_BOOL enabled = VARIANT_FALSE;
+    HRESULT hr = E_FAIL; LONG count = 0;
+    wchar_t exe[MAX_PATH] = {}, expanded[32768] = {}, normalized[32768] = {};
+
+    if (!root || !name) goto done;
+    if (executable)
     {
-        FILE* file = NULL;
-        if (_wfopen_s(&file, g_configPath, L"wt, ccs=UTF-8") != 0 || !file)
-        {
-            MessageBoxW(g_hWnd, L"无法创建配置文件。", L"TaskbarTemp", MB_OK | MB_ICONERROR);
-            return;
-        }
-        fwprintf(file, L"# style = mono | number | pill | ring\nstyle = mono\n");
-        fclose(file);
+        if (wcscpy_s(exe, MAX_PATH, executable) != 0) goto done;
     }
-    wchar_t quoted[MAX_PATH + 3];
-    swprintf(quoted, MAX_PATH + 3, L"\"%s\"", g_configPath);
-    ShellExecuteW(g_hWnd, L"open", L"notepad.exe", quoted, NULL, SW_SHOWNORMAL);
+    else if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) goto done;
+    hr = CoCreateInstance(__uuidof(TaskScheduler), NULL, CLSCTX_INPROC_SERVER, __uuidof(ITaskService), (void**)&service);
+    if (FAILED(hr) || FAILED(service->Connect(empty, empty, empty, empty)) || FAILED(service->GetFolder(root, &folder))) goto done;
+    hr = folder->GetTask(name, &task);
+    if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) { result = STARTUP_ABSENT; goto done; }
+    if (FAILED(hr)) goto done;
+    if (FAILED(task->get_Enabled(&enabled)) || FAILED(task->get_Definition(&definition)) ||
+        FAILED(definition->get_Actions(&actions)) || FAILED(actions->get_Count(&count))) goto done;
+    if (count != 1) { result = STARTUP_CONFLICT; goto done; }
+    if (FAILED(actions->get_Item(1, &action)) || FAILED(action->QueryInterface(__uuidof(IExecAction), (void**)&exec)) ||
+        FAILED(exec->get_Path(&path)) || !path) { result = STARTUP_CONFLICT; goto done; }
+    {
+        wchar_t clean[32768];
+        if (wcslen(path) >= _countof(clean)) goto done;
+        wcscpy_s(clean, _countof(clean), path);
+        wchar_t* start = clean;
+        while (*start == L' ' || *start == L'\t' || *start == L'"') start++;
+        size_t length = wcslen(start);
+        while (length && (start[length - 1] == L' ' || start[length - 1] == L'\t' || start[length - 1] == L'"')) start[--length] = 0;
+        DWORD expandedLength = ExpandEnvironmentStringsW(start, expanded, _countof(expanded));
+        if (!expandedLength || expandedLength > _countof(expanded) || !GetFullPathNameW(expanded, _countof(normalized), normalized, NULL)) goto done;
+        if (_wcsicmp(normalized, exe) != 0) { result = STARTUP_CONFLICT; goto done; }
+        result = enabled == VARIANT_TRUE ? STARTUP_ENABLED : STARTUP_DISABLED;
+    }
+done:
+    if (path) SysFreeString(path);
+    if (exec) exec->Release();
+    if (action) action->Release();
+    if (actions) actions->Release();
+    if (definition) definition->Release();
+    if (task) task->Release();
+    if (folder) folder->Release();
+    if (service) service->Release();
+    if (root) SysFreeString(root);
+    if (name) SysFreeString(name);
+    if (SUCCEEDED(initialized)) CoUninitialize();
+    return result;
+}
+
+static void ShowTrayMenu(HWND owner)
+{
+    if (!g_hMenu || !g_styleMenu) return;
+    CheckMenuRadioItem(g_styleMenu, 10, 13, 10 + (UINT)g_iconStyle, MF_BYCOMMAND);
+    g_startupStatus = QueryStartupStatus();
+    UINT flags = MF_BYCOMMAND;
+    if (g_startupStatus == STARTUP_ENABLED) flags |= MF_CHECKED;
+    else flags |= MF_UNCHECKED;
+    CheckMenuItem(g_hMenu, 6, flags);
+    if (g_startupStatus == STARTUP_CONFLICT || g_startupStatus == STARTUP_UNKNOWN)
+    {
+        EnableMenuItem(g_hMenu, 6, MF_BYCOMMAND | MF_GRAYED);
+        ModifyMenuW(g_hMenu, 6, MF_BYCOMMAND | MF_STRING | MF_GRAYED, 6,
+            g_startupStatus == STARTUP_CONFLICT ? L"开机启动（同名任务属于其他程序）" : L"开机启动（状态不可用）");
+    }
+    else
+    {
+        ModifyMenuW(g_hMenu, 6, MF_BYCOMMAND | MF_STRING, 6, L"开机启动（延迟两分钟）");
+        EnableMenuItem(g_hMenu, 6, MF_BYCOMMAND | MF_ENABLED);
+        CheckMenuItem(g_hMenu, 6, MF_BYCOMMAND | (g_startupStatus == STARTUP_ENABLED ? MF_CHECKED : MF_UNCHECKED));
+    }
+    POINT pt; GetCursorPos(&pt); SetForegroundWindow(owner);
+    TrackPopupMenu(g_hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, owner, NULL);
+    PostMessageW(owner, WM_NULL, 0, 0);
 }
 
 static void ManageAutostart(BOOL install)
@@ -1182,11 +1320,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_TRAYICON:
         if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU)
         {
-            POINT pt;
-            GetCursorPos(&pt);
-            SetForegroundWindow(hWnd);
-            TrackPopupMenu(g_hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
-            PostMessage(hWnd, WM_NULL, 0, 0);
+            ShowTrayMenu(hWnd);
         }
         else if (lParam == WM_LBUTTONUP)
         {
@@ -1198,9 +1332,26 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (LOWORD(wParam) == 2) ShowDetails();
         else if (LOWORD(wParam) == 3) { SampleAll(); UpdateTray(); UpdateDetails(); }
         else if (LOWORD(wParam) == 4) CopyTemperature();
-        else if (LOWORD(wParam) == 5) OpenIconSettings();
-        else if (LOWORD(wParam) == 6) ManageAutostart(TRUE);
-        else if (LOWORD(wParam) == 7) ManageAutostart(FALSE);
+        else if (LOWORD(wParam) == 6 && (g_startupStatus == STARTUP_ENABLED || g_startupStatus == STARTUP_DISABLED || g_startupStatus == STARTUP_ABSENT))
+        {
+            if (QueryStartupStatus() != g_startupStatus)
+                MessageBoxW(hWnd, L"开机启动状态已变化，请重新打开菜单。", L"TaskbarTemp", MB_OK | MB_ICONINFORMATION);
+            else ManageAutostart(g_startupStatus != STARTUP_ENABLED);
+        }
+        else if (LOWORD(wParam) >= 10 && LOWORD(wParam) <= 13)
+        {
+            IconStyle selected = (IconStyle)(LOWORD(wParam) - 10);
+            if (selected != g_iconStyle)
+            {
+                if (SaveIconStyle(selected))
+                {
+                    g_iconStyle = selected;
+                    g_lastIconText[0] = 0;
+                    UpdateTray();
+                }
+                else MessageBoxW(hWnd, L"无法保存图标样式，请检查程序目录的写入权限。", L"TaskbarTemp", MB_OK | MB_ICONERROR);
+            }
+        }
         else if (LOWORD(wParam) == 1)
             DestroyWindow(hWnd);
         return 0;
@@ -1245,12 +1396,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
                              0, 0, 0, 0, NULL, NULL, hInst, NULL);
 
     g_hMenu = CreatePopupMenu();
-    AppendMenuW(g_hMenu, MF_STRING, 2, L"详情");
+    g_styleMenu = CreatePopupMenu();
+    AppendMenuW(g_styleMenu, MF_STRING, 10, L"单色数字");
+    AppendMenuW(g_styleMenu, MF_STRING, 11, L"彩色数字");
+    AppendMenuW(g_styleMenu, MF_STRING, 12, L"胶囊");
+    AppendMenuW(g_styleMenu, MF_STRING, 13, L"圆环");
+    AppendMenuW(g_hMenu, MF_STRING, 2, L"查看详情");
     AppendMenuW(g_hMenu, MF_STRING, 3, L"立即刷新");
-    AppendMenuW(g_hMenu, MF_STRING, 4, L"复制数值");
-    AppendMenuW(g_hMenu, MF_STRING, 5, L"图标样式设置（重启后生效）");
-    AppendMenuW(g_hMenu, MF_STRING, 6, L"安装开机自启");
-    AppendMenuW(g_hMenu, MF_STRING, 7, L"移除开机自启");
+    AppendMenuW(g_hMenu, MF_STRING, 4, L"复制温度");
+    AppendMenuW(g_hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(g_hMenu, MF_POPUP, (UINT_PTR)g_styleMenu, L"图标样式");
+    AppendMenuW(g_hMenu, MF_STRING, 6, L"开机启动（延迟两分钟）");
     AppendMenuW(g_hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(g_hMenu, MF_STRING, 1, L"退出");
 

@@ -76,6 +76,7 @@ static HICON  g_hIcon;
 static HMENU  g_hMenu;
 static NOTIFYICONDATAW g_nid;
 static UINT g_taskbarCreated;
+static BOOL g_trayRegistered;
 static wchar_t g_lastIconText[8] = L"";
 static UINT64 g_lastIconColor = 0;
 enum IconStyle { ICON_MONO, ICON_NUMBER, ICON_PILL, ICON_RING };
@@ -303,6 +304,7 @@ static void Log(const wchar_t* fmt, ...)
 
 static void WriteHeartbeat(void)
 {
+    if (g_preview) return;
     wchar_t dir[MAX_PATH], path[MAX_PATH];
     if (!GetEnvironmentVariableW(L"LOCALAPPDATA", dir, MAX_PATH)) return;
     swprintf(path, MAX_PATH, L"%s\\TaskbarTempCpp", dir);
@@ -773,9 +775,62 @@ static void UpdateDetails(void)
 static void DrawDetailRow(HDC dc, int y, const wchar_t* title, const wchar_t* value, COLORREF label, COLORREF text)
 {
     SetTextColor(dc, label);
-    TextOutW(dc, 75, y, title, (int)wcslen(title));
+    TextOutW(dc, 68, y, title, (int)wcslen(title));
     SetTextColor(dc, text);
-    TextOutW(dc, 140, y, value, (int)wcslen(value));
+    TextOutW(dc, 133, y, value, (int)wcslen(value));
+}
+
+// Line drawings adapted from Lucide's CPU, circuit-board and memory-stick icons.
+static void DrawHardwareIcon(HDC dc, int x, int y, const wchar_t* category, COLORREF color)
+{
+    GpGraphics* graphics = NULL; GpPen* pen = NULL;
+    if (GdipCreateFromHDC(dc, &graphics) != Ok) return;
+    GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+    ARGB argb = 0xFF000000 | (GetRValue(color) << 16) | (GetGValue(color) << 8) | GetBValue(color);
+    if (GdipCreatePen1(argb, 1.6f, UnitPixel, &pen) == Ok)
+    {
+        GdipSetPenStartCap(pen, LineCapRound); GdipSetPenEndCap(pen, LineCapRound);
+        GdipSetPenLineJoin(pen, LineJoinRound);
+        if (wcscmp(category, L"CPU") == 0)
+        {
+            GdipDrawRectangle(graphics, pen, (REAL)x+4, (REAL)y+4, 16, 16);
+            GdipDrawRectangle(graphics, pen, (REAL)x+8, (REAL)y+8, 8, 8);
+            for (int i = 0; i < 3; i++)
+            {
+                REAL p = (REAL)(7 + i * 5);
+                GdipDrawLine(graphics, pen, x+p, (REAL)y+2, x+p, (REAL)y+4);
+                GdipDrawLine(graphics, pen, x+p, (REAL)y+20, x+p, (REAL)y+22);
+                GdipDrawLine(graphics, pen, (REAL)x+2, y+p, (REAL)x+4, y+p);
+                GdipDrawLine(graphics, pen, (REAL)x+20, y+p, (REAL)x+22, y+p);
+            }
+        }
+        else if (wcscmp(category, L"GPU") == 0)
+        {
+            GdipDrawRectangle(graphics, pen, (REAL)x+3, (REAL)y+3, 18, 18);
+            GdipDrawEllipse(graphics, pen, (REAL)x+7, (REAL)y+7, 4, 4);
+            GdipDrawEllipse(graphics, pen, (REAL)x+13, (REAL)y+13, 4, 4);
+            GdipDrawLine(graphics, pen, (REAL)x+11, (REAL)y+9, (REAL)x+15, (REAL)y+9);
+            GdipDrawLine(graphics, pen, (REAL)x+15, (REAL)y+9, (REAL)x+17, (REAL)y+7);
+            GdipDrawLine(graphics, pen, (REAL)x+17, (REAL)y+7, (REAL)x+17, (REAL)y+3);
+            GdipDrawLine(graphics, pen, (REAL)x+7, (REAL)y+21, (REAL)x+7, (REAL)y+17);
+            GdipDrawLine(graphics, pen, (REAL)x+7, (REAL)y+17, (REAL)x+9, (REAL)y+15);
+            GdipDrawLine(graphics, pen, (REAL)x+9, (REAL)y+15, (REAL)x+13, (REAL)y+15);
+        }
+        else
+        {
+            GdipDrawRectangle(graphics, pen, (REAL)x+2, (REAL)y+6, 20, 10);
+            for (int i = 0; i < 4; i++)
+            {
+                REAL p = (REAL)(8 + 4 * i);
+                GdipDrawLine(graphics, pen, x+p, (REAL)y+10, x+p, (REAL)y+12);
+                if (i < 3) GdipDrawLine(graphics, pen, x+p, (REAL)y+16, x+p, (REAL)y+18);
+            }
+            GdipDrawLine(graphics, pen, (REAL)x+4, (REAL)y+16, (REAL)x+4, (REAL)y+18);
+            GdipDrawLine(graphics, pen, (REAL)x+20, (REAL)y+16, (REAL)x+20, (REAL)y+18);
+        }
+        GdipDeletePen(pen);
+    }
+    GdipDeleteGraphics(graphics);
 }
 
 static void DrawDetailCard(HDC dc, int top, int bottom, const wchar_t* category, const wchar_t* title,
@@ -790,47 +845,25 @@ static void DrawDetailCard(HDC dc, int top, int bottom, const wchar_t* category,
     brush = CreateSolidBrush(tile);
     oldBrush = SelectObject(dc, brush);
     oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-    RoundRect(dc, 20, top + 10, 60, top + 50, 10, 10);
+    RoundRect(dc, 20, top + 10, 54, top + 44, 9, 9);
     SelectObject(dc, oldBrush); SelectObject(dc, oldPen); DeleteObject(brush);
-    HPEN iconPen = CreatePen(PS_SOLID, 1, accent);
-    oldPen = SelectObject(dc, iconPen);
-    oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    int x = 25, y = top + 15;
-    if (wcscmp(category, L"CPU") == 0)
-    {
-        Rectangle(dc, x + 5, y + 5, x + 17, y + 17);
-        for (int i = 0; i < 3; i++)
-        {
-            int d = 7 + i * 4;
-            MoveToEx(dc, x + d, y + 1, NULL); LineTo(dc, x + d, y + 5);
-            MoveToEx(dc, x + d, y + 17, NULL); LineTo(dc, x + d, y + 21);
-            MoveToEx(dc, x + 1, y + d, NULL); LineTo(dc, x + 5, y + d);
-            MoveToEx(dc, x + 17, y + d, NULL); LineTo(dc, x + 21, y + d);
-        }
-    }
-    else if (wcscmp(category, L"GPU") == 0)
-    {
-        Rectangle(dc, x + 2, y + 5, x + 21, y + 18);
-        Ellipse(dc, x + 6, y + 7, x + 16, y + 16);
-        MoveToEx(dc, x + 21, y + 9, NULL); LineTo(dc, x + 24, y + 9);
-        MoveToEx(dc, x + 21, y + 14, NULL); LineTo(dc, x + 24, y + 14);
-    }
-    else
-    {
-        Rectangle(dc, x + 2, y + 6, x + 22, y + 17);
-        for (int i = 0; i < 4; i++)
-        {
-            int d = 5 + i * 4;
-            MoveToEx(dc, x + d, y + 8, NULL); LineTo(dc, x + d, y + 15);
-            MoveToEx(dc, x + d, y + 17, NULL); LineTo(dc, x + d, y + 20);
-        }
-    }
-    SelectObject(dc, oldPen); SelectObject(dc, oldBrush); DeleteObject(iconPen);
+    DrawHardwareIcon(dc, 25, top + 15, category, accent);
     HGDIOBJ oldFont = SelectObject(dc, titleFont);
     SetTextColor(dc, text);
-    RECT titleRect = {75, top + 8, 330, top + 28};
+    RECT titleRect = {68, top + 8, 330, top + 28};
     DrawTextW(dc, title, -1, &titleRect, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     SelectObject(dc, oldFont);
+}
+
+static void CleanHardwareName(wchar_t* name)
+{
+    const wchar_t* marks[] = {L"(R)", L"(TM)"};
+    for (const wchar_t* mark : marks)
+    {
+        wchar_t* pos;
+        while ((pos = wcsstr(name, mark)) != NULL)
+            memmove(pos, pos + wcslen(mark), (wcslen(pos + wcslen(mark)) + 1) * sizeof(wchar_t));
+    }
 }
 
 static void PaintDetails(HWND hwnd, HDC target)
@@ -857,13 +890,15 @@ static void PaintDetails(HWND hwnd, HDC target)
     SetMapMode(dc, MM_ANISOTROPIC);
     SetWindowExtEx(dc, 350, 300, NULL); SetViewportExtEx(dc, bounds.right, bounds.bottom, NULL);
     SetBkMode(dc, TRANSPARENT);
-    HFONT normal = CreateFontW(-14,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Microsoft YaHei UI");
-    HFONT bold = CreateFontW(-15,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Microsoft YaHei UI");
+    HFONT normal = CreateFontW(-12,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Microsoft YaHei UI");
+    HFONT bold = CreateFontW(-13,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Microsoft YaHei UI");
     HGDIOBJ oldFont = SelectObject(dc, normal);
     wchar_t cpu[128] = L"CPU"; DWORD cpuBytes = sizeof(cpu);
     RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", L"ProcessorNameString", RRF_RT_REG_SZ, NULL, cpu, &cpuBytes);
+    CleanHardwareName(cpu);
+    wchar_t gpu[128]; wcscpy_s(gpu, 128, g_gpuName); CleanHardwareName(gpu);
     DrawDetailCard(dc, 10, 126, L"CPU", cpu, fill, border, tile, accent, text, bold);
-    DrawDetailCard(dc, 132, 218, L"GPU", g_gpuName, fill, border, tile, accent, text, bold);
+    DrawDetailCard(dc, 132, 218, L"GPU", gpu, fill, border, tile, accent, text, bold);
     DrawDetailCard(dc, 224, 288, L"RAM", L"物理内存", fill, border, tile, accent, text, bold);
     wchar_t value[100], down[24], up[24];
     if (g_sample.tempValid) swprintf(value, 100, L"%.1f °C", g_sample.tempC); else wcscpy_s(value, 100, L"未读到温度");
@@ -1007,7 +1042,7 @@ static void ManageAutostart(BOOL install)
         L"if($t -and $t.Actions.Count -eq 1 -and $t.Actions[0].Execute){$existing=[IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($t.Actions[0].Execute.Trim().Trim([char]34)))};"
         L"$same=$existing -and [string]::Equals($existing,$exe,[StringComparison]::OrdinalIgnoreCase);"
         L"if($t -and $t.Description -ne $owner -and -not $same){exit 3};"
-        L"$a=New-ScheduledTaskAction -Execute $exe;$trigger=New-ScheduledTaskTrigger -AtLogOn;"
+        L"$a=New-ScheduledTaskAction -Execute $exe;$trigger=New-ScheduledTaskTrigger -AtLogOn;$trigger.Delay='PT2M';"
         L"$p=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest;"
         L"$s=New-ScheduledTaskSettingsSet -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable;"
         L"Register-ScheduledTask -TaskName 'TaskbarTemp' -TaskPath '\\' -Action $a -Trigger $trigger -Principal $p -Settings $s -Description $owner -Force | Out-Null;exit 0}catch{exit 1}";
@@ -1034,6 +1069,20 @@ static void ManageAutostart(BOOL install)
 }
 
 // ---------- 托盘 ----------
+static BOOL RegisterTray(void)
+{
+    if (g_preview) return TRUE;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    if (Shell_NotifyIconW(NIM_ADD, &g_nid) || Shell_NotifyIconW(NIM_MODIFY, &g_nid))
+    {
+        if (!g_trayRegistered) Log(L"tray icon registered");
+        g_trayRegistered = TRUE;
+        return TRUE;
+    }
+    g_trayRegistered = FALSE;
+    return FALSE;
+}
+
 static void UpdateTray(void)
 {
     wchar_t text[8];
@@ -1092,12 +1141,12 @@ static void UpdateTray(void)
     {
         wcscpy_s(g_nid.szTip, 128, tip);
         g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-        Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+        if (g_trayRegistered && !Shell_NotifyIconW(NIM_MODIFY, &g_nid)) g_trayRegistered = FALSE;
     }
     else if (iconChanged)
     {
         g_nid.uFlags = NIF_ICON;
-        Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+        if (g_trayRegistered && !Shell_NotifyIconW(NIM_MODIFY, &g_nid)) g_trayRegistered = FALSE;
     }
 }
 
@@ -1106,8 +1155,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 {
     if (g_taskbarCreated && msg == g_taskbarCreated)
     {
-        g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-        if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) Log(L"tray restore failed after Explorer restart");
+        g_trayRegistered = FALSE;
+        if (!RegisterTray()) Log(L"tray unavailable after Explorer restart; retrying");
         return 0;
     }
     switch (msg)
@@ -1117,6 +1166,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         {
             SampleAll();
             UpdateTray();
+            if (!g_trayRegistered) RegisterTray();
             UpdateDetails();
         }
         else if (wParam == TIMER_ID_HEARTBEAT) WriteHeartbeat();
@@ -1174,7 +1224,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
     g_previewDark = wcscmp(cmd, L"--preview-dark") == 0;
     g_preview = g_previewDark || wcscmp(cmd, L"--preview") == 0;
 
-    g_hSingleInstance = CreateMutexW(NULL, TRUE, L"Global\\TaskbarTemp_SingleInstance");
+    g_hSingleInstance = CreateMutexW(NULL, TRUE, g_preview ? L"Local\\TaskbarTemp_Preview" : L"Global\\TaskbarTemp_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS)
     {
         MessageBoxW(NULL, L"TaskbarTempCpp 已在运行（看任务栏托盘）。", L"TaskbarTempCpp", MB_OK | MB_ICONINFORMATION);
@@ -1216,11 +1266,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
     wcscpy_s(g_nid.szTip, 128, L"CPU 启动中…");
-    if (!Shell_NotifyIconW(NIM_ADD, &g_nid))
-    {
-        Log(L"Shell_NotifyIcon add failed");
-        return 1;
-    }
+    if (!RegisterTray()) Log(L"tray unavailable at startup; retrying");
 
     InitCpuTopology();
     InitGpu();

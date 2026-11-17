@@ -1155,7 +1155,7 @@ namespace TaskbarTemp
                     "$owned = $task -and $task.Description -eq $owner;" +
                     "if ($task -and -not $owned -and -not $samePath) { throw 'A different scheduled task already uses this name.'; };" +
                     "$a = New-ScheduledTaskAction -Execute $env:TT_EXE;" +
-                    "$t = New-ScheduledTaskTrigger -AtLogOn;" +
+                    "$t = New-ScheduledTaskTrigger -AtLogOn; $t.Delay = 'PT2M';" +
                     "$p = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest;" +
                     "$s = New-ScheduledTaskSettingsSet -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries " +
                     "-ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable;" +

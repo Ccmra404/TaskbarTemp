@@ -12,7 +12,7 @@ $createdRoot = $false
 
 function Get-ScheduledTask { [CmdletBinding()] param($TaskName, $TaskPath) return $mockState.Task }
 function New-ScheduledTaskAction { param($Execute) return [pscustomobject]@{ Execute = $Execute } }
-function New-ScheduledTaskTrigger { param([switch]$AtLogOn) return [pscustomobject]@{ AtLogOn = $AtLogOn.IsPresent } }
+function New-ScheduledTaskTrigger { param([switch]$AtLogOn) return [pscustomobject]@{ AtLogOn = $AtLogOn.IsPresent; Delay = $null } }
 function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) return [pscustomobject]@{ RunLevel = $RunLevel } }
 function New-ScheduledTaskSettingsSet {
     param([switch]$DontStopIfGoingOnBatteries, [switch]$AllowStartIfOnBatteries, $ExecutionTimeLimit, [switch]$StartWhenAvailable)
@@ -30,6 +30,7 @@ function Assert([bool]$condition, [string]$message) {
 
 try {
     Assert ($program.Contains('Ccmra404.TaskbarTemp.Startup.v1')) 'tray startup uses the installer ownership marker'
+    Assert ($program.Contains("`$t.Delay = 'PT2M'")) 'tray startup preserves a two-minute delay'
     Assert ($program.Contains('if ($task -and -not $owned -and -not $samePath)')) 'tray startup rejects an unrelated same-named task'
     Assert ($program.Contains('if ($samePath) { Unregister-ScheduledTask')) 'tray removal only removes the current executable task'
     Assert (!$program.Contains('schtasks.exe"')) 'tray removal does not delete the task unconditionally'
@@ -46,6 +47,7 @@ try {
     Assert ($mockState.Task.Actions[0].Execute -ieq $first) 'startup uses the selected path'
     Assert ($mockState.Task.Description -eq 'Ccmra404.TaskbarTemp.Startup.v1') 'startup records its ownership marker'
     Assert ($mockState.Task.Principal.RunLevel -eq 'Highest') 'startup uses highest privileges'
+    Assert ($mockState.Task.Trigger.Delay -eq 'PT2M') 'startup waits two minutes after logon'
     Assert ($mockState.Task.Settings.BatteryAllowed -and $mockState.Task.Settings.NoBatteryStop) 'battery use is allowed'
     & $helper -Action Install -ExecutablePath $second
     Assert ($mockState.Task.Actions[0].Execute -ieq $second) 'existing startup moves to the new installation'
